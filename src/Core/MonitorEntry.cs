@@ -133,6 +133,37 @@ public sealed class MonitorEntry
         _onChanged(this);
     }
 
+    /// <summary>
+    /// Records the outcome of a finished write, but only while the marker still
+    /// belongs to that write — a newer queued write's Pending badge must not be
+    /// overwritten by an older write's outcome.
+    /// </summary>
+    public void FinishPendingWrite(byte code, uint target, PendingWrite? outcome)
+    {
+        var changed = false;
+        lock (_gate)
+        {
+            if (code == Vcp.InputSource)
+            {
+                if (_pendingInput is { Phase: OpPhase.Pending } p && p.Target == target)
+                {
+                    _pendingInput = outcome;
+                    changed = true;
+                }
+            }
+            else if (code == Vcp.AudioSpeakerVolume)
+            {
+                if (_pendingVolume is { Phase: OpPhase.Pending } p && p.Target == target)
+                {
+                    _pendingVolume = outcome;
+                    changed = true;
+                }
+            }
+        }
+        if (changed)
+            _onChanged(this);
+    }
+
     public IReadOnlyList<uint> InputValues
     {
         get { lock (_gate) return _caps?.ValuesFor(Vcp.InputSource) ?? []; }

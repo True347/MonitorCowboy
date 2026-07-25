@@ -1,0 +1,70 @@
+name: Publish Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tests/**'
+      - 'tools/**'
+      - '.github/**'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Read version from plugin.json
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Get-Content plugin.json -Raw | ConvertFrom-Json).Version
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Skip when this version is already released
+        id: gate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "v${{ steps.version.outputs.version }}" *> $null
+          if ($LASTEXITCODE -eq 0) { "publish=false" >> $env:GITHUB_OUTPUT } else { "publish=true" >> $env:GITHUB_OUTPUT }
+
+      - name: Run tests
+        if: steps.gate.outputs.publish == 'true'
+        run: dotnet test tests/MonitorCowboy.Tests/MonitorCowboy.Tests.csproj -c Release
+
+      - name: Publish
+        if: steps.gate.outputs.publish == 'true'
+        # No runtime identifier on purpose: AnyCPU IL serves x64 and ARM64 hosts
+        # from one zip. Do not add -r win-x64.
+        run: dotnet publish MonitorCowboy.csproj -c Release -o publish-out
+
+      - name: Package
+        if: steps.gate.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          # publish-out is generated build output only (plugin.json and Images
+          # are copied there by the csproj), so repo files can never leak into
+          # the zip. The SDK assembly must not ship: the host provides it and
+          # dedups by exact assembly identity.
+          Remove-Item publish-out/Flow.Launcher.Plugin.dll -ErrorAction SilentlyContinue
+          Copy-Item LICENSE, README.md publish-out
+          Compress-Archive -Path publish-out/* -DestinationPath Flow.Launcher.Plugin.MonitorCowboy.zip
+
+      - name: Create release
+        if: steps.gate.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: Flow.Launcher.Plugin.MonitorCowboy.zip
+          generate_release_notes: true

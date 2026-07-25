@@ -25,23 +25,32 @@ public sealed class DdcWorker
     private readonly INativeMonitorApi _api;
     private readonly MonitorEntry _entry;
     private readonly Action<string, string>? _onCapabilitiesRead;
+    private readonly Action<byte, uint>? _onWriteFailed;
     private readonly Channel<Signal> _signals = Channel.CreateUnbounded<Signal>();
     private readonly ConcurrentDictionary<byte, uint> _pendingWrites = new();
     private readonly CancellationTokenSource _cts = new();
 
-    public DdcWorker(INativeMonitorApi api, MonitorEntry entry, Action<string, string>? onCapabilitiesRead)
+    public DdcWorker(INativeMonitorApi api, MonitorEntry entry, Action<string, string>? onCapabilitiesRead, Action<byte, uint>? onWriteFailed)
     {
         _api = api;
         _entry = entry;
         _onCapabilitiesRead = onCapabilitiesRead;
+        _onWriteFailed = onWriteFailed;
         Completion = Task.Run(ConsumeAsync);
     }
 
     public Task Completion { get; }
 
-    public void RequestReadValues() => _signals.Writer.TryWrite(Signal.ReadValues);
+    public bool RequestReadValues()
+    {
+        if (_signals.Writer.TryWrite(Signal.ReadValues))
+            return true;
+        // Never let the refresh-in-flight flag stick on a torn-down worker.
+        _entry.EndRefresh(anyReadFailed: true);
+        return false;
+    }
 
-    public void RequestReadCapabilities() => _signals.Writer.TryWrite(Signal.ReadCapabilities);
+    public bool RequestReadCapabilities() => _signals.Writer.TryWrite(Signal.ReadCapabilities);
 
     /// <summary>
     /// Queue a VCP write. Consecutive writes to the same code are merged
@@ -159,7 +168,8 @@ public sealed class DdcWorker
     {
         if (!_api.TrySetVcpFeature(_entry.Handle, code, target))
         {
-            _entry.SetPendingWrite(code, new PendingWrite(target, OpPhase.Failed));
+            _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed));
+            _onWriteFailed?.Invoke(code, target);
             return;
         }
 
@@ -178,7 +188,7 @@ public sealed class DdcWorker
                 if (matches)
                 {
                     _entry.ApplyReadValue(code, current, max);
-                    _entry.SetPendingWrite(code, null);
+                    _entry.FinishPendingWrite(code, target, null);
                     return;
                 }
             }
@@ -189,7 +199,7 @@ public sealed class DdcWorker
 
         // Common and expected when the write switched the monitor's input away
         // from this machine; report honestly instead of guessing.
-        _entry.SetPendingWrite(code, new PendingWrite(target, OpPhase.Unverified));
+        _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Unverified));
     }
 
     private void FailRemainingWrites()
@@ -197,7 +207,7 @@ public sealed class DdcWorker
         foreach (var code in _pendingWrites.Keys.ToArray())
         {
             if (_pendingWrites.TryRemove(code, out var target))
-                _entry.SetPendingWrite(code, new PendingWrite(target, OpPhase.Failed));
+                _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed));
         }
     }
 }

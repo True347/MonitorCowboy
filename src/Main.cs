@@ -14,12 +14,15 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     private MonitorService? _service;
     private TopologyWatcher? _watcher;
     private ResultFactory? _factory;
+    private Timer? _deferredRefresh;
 
     private readonly object _refreshGate = new();
     private string _lastRawQuery = "";
     private string? _lastDevicePath;
+    private CancellationToken _lastQueryToken = CancellationToken.None;
     private DateTime _lastQueryAtUtc = DateTime.MinValue;
     private DateTime _lastPushRefreshUtc = DateTime.MinValue;
+    private bool _pushRefreshInduced;
 
     public Task InitAsync(PluginInitContext context)
     {
@@ -33,19 +36,24 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
         _service = new MonitorService(new RealNativeMonitorApi(), store, LogError);
         _service.StateChanged += OnServiceStateChanged;
+        _service.WriteFailed += OnWriteFailed;
         _service.Initialize();
 
-        _factory = new ResultFactory(context.API, _service);
+        _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory);
         _watcher = new TopologyWatcher(OnTopologyChanged);
+        _deferredRefresh = new Timer(_ => TryPushRefresh(fromTimer: true), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
 
         return Task.CompletedTask;
     }
 
     public Task<List<Result>> QueryAsync(Query query, CancellationToken token)
     {
+        var service = _service;
+        var factory = _factory;
+
         try
         {
-            if (_service is null || _factory is null)
+            if (service is null || factory is null)
             {
                 return Task.FromResult(new List<Result>
                 {
@@ -59,18 +67,22 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 });
             }
 
-            var snapshots = _service.GetSnapshots();
+            var snapshots = service.GetSnapshots();
             var intent = QueryRouter.Parse(query.Search, snapshots);
+            var devicePath = DevicePathOf(intent);
 
-            RecordQueryContext(query.TrimmedQuery, intent);
-            _service.RequestVolatileRefresh();
+            // OriginalQuery round-trips the textbox byte-for-byte, so the push
+            // refresh always hits ChangeQuery's equal-text pure-requery branch
+            // (TrimmedQuery would strip the trailing space drill queries need).
+            RecordQueryContext(query.OriginalQuery, devicePath, token);
+            service.RequestVolatileRefresh(devicePath);
 
-            return Task.FromResult(_factory.Build(intent, snapshots, query.ActionKeyword));
+            return Task.FromResult(factory.Build(intent, snapshots, query.ActionKeyword));
         }
         catch (Exception ex)
         {
             LogError("Query failed", ex);
-            var message = _factory?.ErrorItem(ex.Message) ?? new Result
+            var message = factory?.ErrorItem(ex.Message, ResultFactory.PrefixFor(query.ActionKeyword)) ?? new Result
             {
                 Title = "MonitorCowboy error",
                 SubTitle = ex.Message,
@@ -119,9 +131,13 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         _watcher?.Dispose();
         _watcher = null;
 
+        _deferredRefresh?.Dispose();
+        _deferredRefresh = null;
+
         if (_service is not null)
         {
             _service.StateChanged -= OnServiceStateChanged;
+            _service.WriteFailed -= OnWriteFailed;
             _service.Dispose();
             _service = null;
         }
@@ -136,56 +152,83 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         _ = service.RebuildTopologyAsync();
     }
 
-    private void RecordQueryContext(string rawQuery, QueryIntent intent)
+    private static string? DevicePathOf(QueryIntent intent) => intent switch
     {
-        var devicePath = intent switch
-        {
-            MonitorMenuIntent m => m.Monitor.DevicePath,
-            InputMenuIntent m => m.Monitor.DevicePath,
-            VolumeMenuIntent m => m.Monitor.DevicePath,
-            _ => null,
-        };
+        MonitorMenuIntent m => m.Monitor.DevicePath,
+        InputMenuIntent m => m.Monitor.DevicePath,
+        VolumeMenuIntent m => m.Monitor.DevicePath,
+        _ => null,
+    };
 
+    private void RecordQueryContext(string rawQuery, string? devicePath, CancellationToken token)
+    {
         lock (_refreshGate)
         {
+            // A requery this plugin triggered itself must not extend the push
+            // window: the window anchors to the last user-originated query.
+            var selfInduced = _pushRefreshInduced && rawQuery == _lastRawQuery;
+            _pushRefreshInduced = false;
+
             _lastRawQuery = rawQuery;
             _lastDevicePath = devicePath;
-            _lastQueryAtUtc = DateTime.UtcNow;
+            _lastQueryToken = token;
+            if (!selfInduced)
+                _lastQueryAtUtc = DateTime.UtcNow;
         }
     }
 
     /// <summary>
-    /// Bridges background completion (warm-up, refresh, verify-after-set) to the
-    /// UI: re-runs the last query so the window shows the final state. Only fires
-    /// while the user is plausibly still looking (short window since the last
-    /// keystroke), only for the monitor being viewed, and throttled.
-    /// ChangeQuery marshals to the UI thread internally, so calling it from a
-    /// worker thread is safe (ReQuery is not — do not switch to it).
+    /// Bridges background completion (warm-up, refresh, verify-after-set) to
+    /// the UI by re-running the last query. ChangeQuery marshals to the UI
+    /// thread internally and its equal-text + requery branch re-runs the query
+    /// without touching the textbox (ReQuery is not thread-safe — keep away).
     /// </summary>
     private void OnServiceStateChanged(string devicePath)
     {
-        string rawQuery;
         string? contextPath;
-        DateTime lastQueryAt;
+        lock (_refreshGate)
+            contextPath = _lastDevicePath;
 
+        if (contextPath is not null && devicePath.Length > 0 && devicePath != contextPath)
+            return;
+
+        TryPushRefresh(fromTimer: false);
+    }
+
+    private void TryPushRefresh(bool fromTimer)
+    {
+        string rawQuery;
+        CancellationToken token;
+        DateTime lastQueryAt;
         lock (_refreshGate)
         {
             rawQuery = _lastRawQuery;
-            contextPath = _lastDevicePath;
+            token = _lastQueryToken;
             lastQueryAt = _lastQueryAtUtc;
         }
 
         var now = DateTime.UtcNow;
         if (rawQuery.Length == 0 || now - lastQueryAt > PushRefreshWindow)
             return;
-        if (contextPath is not null && devicePath.Length > 0 && devicePath != contextPath)
+        // Flow cancels a query's token when a newer keystroke supersedes it; a
+        // stale refresh would overwrite text the user is currently typing.
+        if (token.IsCancellationRequested)
             return;
 
         lock (_refreshGate)
         {
-            if (now - _lastPushRefreshUtc < PushRefreshThrottle)
+            var sinceLast = now - _lastPushRefreshUtc;
+            if (sinceLast < PushRefreshThrottle)
+            {
+                // Trailing edge: never drop the final state transition (e.g.
+                // Applying… -> ✓); re-fire once the throttle window has passed.
+                if (!fromTimer)
+                    _deferredRefresh?.Change(PushRefreshThrottle - sinceLast, Timeout.InfiniteTimeSpan);
                 return;
+            }
+
             _lastPushRefreshUtc = now;
+            _pushRefreshInduced = true;
         }
 
         try
@@ -197,6 +240,28 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             LogError("Push refresh failed", ex);
         }
     }
+
+    private void OnWriteFailed(string devicePath, byte code, uint target)
+    {
+        var feature = code == Vcp.InputSource ? "input source" : "volume";
+        var name = _service?.GetSnapshots().FirstOrDefault(s => s.DevicePath == devicePath)?.FriendlyName ?? "The monitor";
+
+        try
+        {
+            _context.API.ShowMsg(
+                "MonitorCowboy: set failed",
+                $"{name} rejected the {feature} change.",
+                AbsoluteIcon("error.png"));
+        }
+        catch (Exception ex)
+        {
+            LogError("ShowMsg failed", ex);
+        }
+    }
+
+    // Toast icons need absolute paths (result IcoPath is plugin-relative).
+    private string AbsoluteIcon(string fileName)
+        => Path.Combine(_context.CurrentPluginMetadata.PluginDirectory ?? "", "Images", fileName);
 
     private void LogError(string message, Exception? ex)
     {

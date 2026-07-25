@@ -20,9 +20,14 @@ public sealed class MonitorService : IDisposable
 
     private List<(MonitorEntry Entry, DdcWorker Worker)> _monitors = [];
     private bool _disposed;
+    private int _rebuildPending;
+    private int _clearCapsPending;
 
     /// <summary>Raised (from worker threads) whenever any monitor's state changes. Payload is the device path.</summary>
     public event Action<string>? StateChanged;
+
+    /// <summary>Raised (from worker threads) when a user-initiated write ends as failed.</summary>
+    public event Action<string, byte, uint>? WriteFailed;
 
     public MonitorService(INativeMonitorApi api, ICapsStore capsStore, Action<string, Exception?> log)
     {
@@ -50,12 +55,18 @@ public sealed class MonitorService : IDisposable
         return monitors.Select(m => m.Entry.BuildSnapshot()).ToList();
     }
 
-    /// <summary>TTL-gated refresh of volatile values (input/volume) for every ready monitor.</summary>
-    public void RequestVolatileRefresh()
+    /// <summary>
+    /// TTL-gated refresh of volatile values (input/volume). When
+    /// <paramref name="devicePath"/> is given only that monitor is refreshed;
+    /// null refreshes every ready monitor (L1 view).
+    /// </summary>
+    public void RequestVolatileRefresh(string? devicePath = null)
     {
         var now = DateTime.UtcNow;
         foreach (var (entry, worker) in Current())
         {
+            if (devicePath is not null && entry.DevicePath != devicePath)
+                continue;
             if (entry.CapsState != CapsState.Ready)
                 continue;
             if (now - entry.LastValuesReadUtc < ValuesTtl)
@@ -67,59 +78,93 @@ public sealed class MonitorService : IDisposable
         }
     }
 
-    public void RequestWrite(string devicePath, byte code, uint target)
+    /// <summary>False when the monitor is not currently addressable (e.g. mid-rebuild).</summary>
+    public bool RequestWrite(string devicePath, byte code, uint target)
     {
-        if (TryFind(devicePath) is var (entry, worker) && entry is not null)
-            worker.RequestWrite(code, target);
+        var (entry, worker) = TryFind(devicePath);
+        if (entry is null)
+            return false;
+
+        worker.RequestWrite(code, target);
+        return true;
     }
 
-    public void RequestValueReread(string devicePath)
+    public bool RequestValueReread(string devicePath)
     {
-        if (TryFind(devicePath) is var (entry, worker) && entry is not null && entry.TryBeginRefresh())
-            worker.RequestReadValues();
+        var (entry, worker) = TryFind(devicePath);
+        if (entry is null || !entry.TryBeginRefresh())
+            return false;
+
+        return worker.RequestReadValues();
     }
 
-    public void RequestCapsReread(string devicePath)
+    public bool RequestCapsReread(string devicePath)
     {
-        if (TryFind(devicePath) is var (entry, worker) && entry is not null)
-        {
-            entry.ResetCapsPending();
-            worker.RequestReadCapabilities();
-        }
+        var (entry, worker) = TryFind(devicePath);
+        if (entry is null)
+            return false;
+
+        entry.ResetCapsPending();
+        if (worker.RequestReadCapabilities())
+            return true;
+
+        entry.MarkCapsUnsupported();
+        return false;
     }
 
     /// <summary>
     /// Tear everything down and re-enumerate. Physical monitor handles must not
-    /// be reused across display topology changes.
+    /// be reused across display topology changes. Requests arriving while a
+    /// rebuild is running are coalesced into one more pass by the current
+    /// holder, so no topology change (or cache-clear request) is ever lost.
     /// </summary>
     public async Task RebuildTopologyAsync(bool clearCapsCache = false)
     {
+        if (clearCapsCache)
+            Interlocked.Exchange(ref _clearCapsPending, 1);
+        Interlocked.Exchange(ref _rebuildPending, 1);
+
         if (!await _rebuildGate.WaitAsync(0).ConfigureAwait(false))
-            return; // A rebuild is already running; the debounced watcher will fire again if needed.
+            return; // The gate holder loops until no pending request remains.
 
         try
         {
-            List<(MonitorEntry Entry, DdcWorker Worker)> old;
-            lock (_gate)
+            while (Interlocked.Exchange(ref _rebuildPending, 0) == 1)
             {
-                old = _monitors;
-                _monitors = [];
+                var clear = Interlocked.Exchange(ref _clearCapsPending, 0) == 1;
+
+                List<(MonitorEntry Entry, DdcWorker Worker)> old;
+                lock (_gate)
+                {
+                    old = _monitors;
+                    _monitors = [];
+                }
+
+                await TearDownAsync(old).ConfigureAwait(false);
+
+                if (clear)
+                    _capsStore.Clear();
+
+                var fresh = BuildMonitors();
+
+                bool published;
+                lock (_gate)
+                {
+                    published = !_disposed;
+                    if (published)
+                        _monitors = fresh;
+                }
+
+                if (!published)
+                {
+                    // Lost the race against Dispose: nothing may stay alive.
+                    await TearDownAsync(fresh).ConfigureAwait(false);
+                    return;
+                }
+
+                WarmUp(fresh);
+                StateChanged?.Invoke(string.Empty);
             }
-
-            await TearDownAsync(old).ConfigureAwait(false);
-
-            if (clearCapsCache)
-                _capsStore.Clear();
-
-            if (_disposed)
-                return;
-
-            var fresh = BuildMonitors();
-            lock (_gate)
-                _monitors = fresh;
-
-            WarmUp(fresh);
-            StateChanged?.Invoke(string.Empty);
         }
         catch (Exception ex)
         {
@@ -133,11 +178,10 @@ public sealed class MonitorService : IDisposable
 
     public void Dispose()
     {
-        _disposed = true;
-
         List<(MonitorEntry Entry, DdcWorker Worker)> old;
         lock (_gate)
         {
+            _disposed = true;
             old = _monitors;
             _monitors = [];
         }
@@ -174,7 +218,11 @@ public sealed class MonitorService : IDisposable
             if (cachedRaw is not null && CapabilitiesParser.Parse(cachedRaw) is { } caps)
                 entry.ApplyCapabilities(caps);
 
-            var worker = new DdcWorker(_api, entry, OnCapabilitiesRead);
+            var worker = new DdcWorker(
+                _api,
+                entry,
+                OnCapabilitiesRead,
+                (code, target) => WriteFailed?.Invoke(entry.DevicePath, code, target));
             result.Add((entry, worker));
         }
 
@@ -206,10 +254,11 @@ public sealed class MonitorService : IDisposable
         {
             await Task.WhenAll(completions).WaitAsync(TeardownBudget).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        catch
         {
-            // A wedged DDC call can outlive the budget; workers still destroy
-            // their handle in their own finally when the call returns.
+            // Timeout: a wedged DDC call can outlive the budget; the worker
+            // still destroys its handle in its own finally when the call
+            // returns. Any other worker fault must not abort re-enumeration.
         }
     }
 

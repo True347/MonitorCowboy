@@ -20,7 +20,7 @@ public sealed class TopologyWatcher : IDisposable
 
     private readonly Action _onTopologyChanged;
     private readonly Timer _timer;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public TopologyWatcher(Action onTopologyChanged)
     {
@@ -62,6 +62,11 @@ public sealed class TopologyWatcher : IDisposable
     {
         _disposed = true;
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
-        _timer.Dispose();
+
+        // Blocking dispose: guarantee no callback runs after this returns, so
+        // the owner can tear down what the callback would have touched.
+        using var done = new ManualResetEvent(false);
+        if (_timer.Dispose(done))
+            done.WaitOne(TimeSpan.FromSeconds(1));
     }
 }

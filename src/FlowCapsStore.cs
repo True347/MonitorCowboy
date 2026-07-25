@@ -23,16 +23,23 @@ public sealed class FlowCapsStore : ICapsStore
 
     public void Put(string devicePath, string rawCapabilities)
     {
+        // Save() must run under the lock: Flow serializes the dictionary, and
+        // a concurrent Put from another monitor's worker would race the
+        // enumeration.
         lock (_gate)
+        {
             _settings.CapabilitiesByDevicePath[devicePath] = rawCapabilities;
-        Save();
+            Save();
+        }
     }
 
     public void Clear()
     {
         lock (_gate)
+        {
             _settings.CapabilitiesByDevicePath.Clear();
-        Save();
+            Save();
+        }
     }
 
     private void Save()
