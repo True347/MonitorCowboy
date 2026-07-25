@@ -108,7 +108,7 @@ public sealed class MonitorService : IDisposable
         if (worker.RequestReadCapabilities())
             return true;
 
-        entry.MarkCapsUnsupported();
+        entry.MarkCapsReadFailed();
         return false;
     }
 
@@ -124,56 +124,70 @@ public sealed class MonitorService : IDisposable
             Interlocked.Exchange(ref _clearCapsPending, 1);
         Interlocked.Exchange(ref _rebuildPending, 1);
 
-        if (!await _rebuildGate.WaitAsync(0).ConfigureAwait(false))
-            return; // The gate holder loops until no pending request remains.
-
-        try
+        while (await _rebuildGate.WaitAsync(0).ConfigureAwait(false))
         {
-            while (Interlocked.Exchange(ref _rebuildPending, 0) == 1)
+            try
             {
-                var clear = Interlocked.Exchange(ref _clearCapsPending, 0) == 1;
-
-                List<(MonitorEntry Entry, DdcWorker Worker)> old;
-                lock (_gate)
+                while (Interlocked.Exchange(ref _rebuildPending, 0) == 1)
                 {
-                    old = _monitors;
-                    _monitors = [];
+                    var clear = Interlocked.Exchange(ref _clearCapsPending, 0) == 1;
+                    if (!await RebuildOnceAsync(clear).ConfigureAwait(false))
+                        return; // Lost the race against Dispose; fresh list already torn down.
                 }
-
-                await TearDownAsync(old).ConfigureAwait(false);
-
-                if (clear)
-                    _capsStore.Clear();
-
-                var fresh = BuildMonitors();
-
-                bool published;
-                lock (_gate)
-                {
-                    published = !_disposed;
-                    if (published)
-                        _monitors = fresh;
-                }
-
-                if (!published)
-                {
-                    // Lost the race against Dispose: nothing may stay alive.
-                    await TearDownAsync(fresh).ConfigureAwait(false);
-                    return;
-                }
-
-                WarmUp(fresh);
-                StateChanged?.Invoke(string.Empty);
             }
+            catch (Exception ex)
+            {
+                _log("Topology rebuild failed", ex);
+            }
+            finally
+            {
+                _rebuildGate.Release();
+            }
+
+            // A request that raced our exit (flag set after the last drain but
+            // acquire failed before the release) would otherwise be stranded
+            // with a free gate: recheck after releasing and take another turn.
+            if (Volatile.Read(ref _rebuildPending) == 0)
+                return;
         }
-        catch (Exception ex)
+
+        // Someone else holds the gate; the pending flag (set above) guarantees
+        // their drain loop or post-release recheck runs the requested pass.
+    }
+
+    private async Task<bool> RebuildOnceAsync(bool clearCapsCache)
+    {
+        List<(MonitorEntry Entry, DdcWorker Worker)> old;
+        lock (_gate)
         {
-            _log("Topology rebuild failed", ex);
+            old = _monitors;
+            _monitors = [];
         }
-        finally
+
+        await TearDownAsync(old).ConfigureAwait(false);
+
+        if (clearCapsCache)
+            _capsStore.Clear();
+
+        var fresh = BuildMonitors();
+
+        bool published;
+        lock (_gate)
         {
-            _rebuildGate.Release();
+            published = !_disposed;
+            if (published)
+                _monitors = fresh;
         }
+
+        if (!published)
+        {
+            await TearDownAsync(fresh).ConfigureAwait(false);
+            return false;
+        }
+
+        WarmUp(fresh);
+        StateChanged?.Invoke(string.Empty);
+        return true;
     }
 
     public void Dispose()

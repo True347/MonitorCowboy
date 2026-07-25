@@ -62,6 +62,18 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         {
             LogError("Initialization failed", ex);
             _initFailed = true;
+
+            // Tear down whatever was partially built so no workers or monitor
+            // handles outlive a failed init.
+            try
+            {
+                Dispose();
+            }
+            catch (Exception disposeEx)
+            {
+                LogError("Cleanup after failed initialization", disposeEx);
+            }
+            _factory = null;
         }
 
         return Task.CompletedTask;

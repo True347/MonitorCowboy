@@ -201,7 +201,7 @@ public sealed class ResultFactory
                     _api.ChangeQuery(view, true);
                     return false;
                 }));
-            score -= 5;
+            score = Math.Max(1, score - 5);
         }
 
         results.Add(BackItem($"{prefix}{m.Index} "));
@@ -233,7 +233,16 @@ public sealed class ResultFactory
                     "Type a volume value, e.g. 30.",
                     IconError, 200, view, _ => false));
             }
-            else if (m.VolumeMax > 0 && requested > m.VolumeMax)
+            else if (m.VolumeMax == 0)
+            {
+                // Never send an unvalidated value to the hardware: until the
+                // monitor's maximum has been read there is no range to check.
+                results.Add(Item(
+                    "Volume range not read yet",
+                    "Try again in a moment — the monitor's maximum has not been read.",
+                    IconWarning, 200, view, _ => false));
+            }
+            else if (requested > m.VolumeMax)
             {
                 results.Add(Item(
                     $"Out of range (0–{m.VolumeMax})",

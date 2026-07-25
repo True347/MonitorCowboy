@@ -68,8 +68,10 @@ public sealed class DdcWorker
         {
             // Worker already completed: withdraw the op so a still-draining
             // consumer cannot send it mid-teardown, then report honestly.
+            // FinishPendingWrite (not SetPendingWrite) so a racing newer
+            // write's Pending badge is never stomped by this failure.
             _pendingWrites.TryRemove(new KeyValuePair<byte, uint>(code, target));
-            _entry.SetPendingWrite(code, new PendingWrite(target, OpPhase.Failed));
+            _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed));
         }
     }
 
@@ -89,18 +91,31 @@ public sealed class DdcWorker
             {
                 while (_signals.Reader.TryRead(out var signal))
                 {
-                    switch (signal)
+                    try
                     {
-                        case Signal.ReadCapabilities:
-                            ExecuteReadCapabilities();
-                            ExecuteReadValues();
-                            break;
-                        case Signal.ReadValues:
-                            ExecuteReadValues();
-                            break;
-                        case Signal.Write:
-                            await ExecuteWritesAsync(ct).ConfigureAwait(false);
-                            break;
+                        switch (signal)
+                        {
+                            case Signal.ReadCapabilities:
+                                ExecuteReadCapabilities();
+                                ExecuteReadValues();
+                                break;
+                            case Signal.ReadValues:
+                                ExecuteReadValues();
+                                break;
+                            case Signal.Write:
+                                await ExecuteWritesAsync(ct).ConfigureAwait(false);
+                                break;
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // State mutations invoke StateChanged subscribers
+                        // synchronously on this task; a throwing subscriber
+                        // must not kill the monitor's DDC pump.
                     }
 
                     await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
@@ -128,7 +143,7 @@ public sealed class DdcWorker
         }
         else
         {
-            _entry.MarkCapsUnsupported();
+            _entry.MarkCapsReadFailed();
         }
     }
 

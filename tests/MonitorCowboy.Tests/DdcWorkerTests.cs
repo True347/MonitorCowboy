@@ -146,6 +146,40 @@ public class DdcWorkerTests
     }
 
     [Fact]
+    public async Task CapsReread_Failure_KeepsKnownGoodCaps()
+    {
+        var api = new FakeNativeMonitorApi { Capabilities = null }; // re-read will fail
+        var entry = NewReadyEntry();
+
+        entry.ResetCapsPending();
+        Assert.Equal(CapsState.Pending, entry.CapsState);
+
+        var worker = new DdcWorker(api, entry, null, null);
+        worker.RequestReadCapabilities();
+
+        await WaitUntilAsync(() => entry.CapsState == CapsState.Ready);
+        Assert.True(entry.SupportsVolume); // the known-good map survived the failed re-read
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task ReadCapabilities_FirstSightFailure_MarksUnsupported()
+    {
+        var api = new FakeNativeMonitorApi { Capabilities = null };
+        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var worker = new DdcWorker(api, entry, null, null);
+
+        worker.RequestReadCapabilities();
+
+        await WaitUntilAsync(() => entry.CapsState == CapsState.Unsupported);
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
     public async Task ReadCapabilities_Success_ChainsValueRead()
     {
         var api = new FakeNativeMonitorApi { Capabilities = CapsWithInputAndVolume };

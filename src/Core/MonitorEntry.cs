@@ -57,23 +57,26 @@ public sealed class MonitorEntry
             _onChanged(this);
     }
 
-    public void MarkCapsUnsupported()
-    {
-        lock (_gate)
-        {
-            _caps = null;
-            _capsState = CapsState.Unsupported;
-        }
-        _onChanged(this);
-    }
-
     public void ResetCapsPending()
     {
         lock (_gate)
         {
-            _caps = null;
+            // Keep the current map: a failed re-read must be able to fall back
+            // to the known-good capabilities instead of discarding them.
             _capsState = CapsState.Pending;
         }
+        _onChanged(this);
+    }
+
+    /// <summary>
+    /// A capabilities read failed. A monitor we have never successfully read
+    /// becomes Unsupported; one with a known-good map keeps it — a transient
+    /// glitch (sleep, busy bus) must not demote a working monitor.
+    /// </summary>
+    public void MarkCapsReadFailed()
+    {
+        lock (_gate)
+            _capsState = _caps is not null ? CapsState.Ready : CapsState.Unsupported;
         _onChanged(this);
     }
 
