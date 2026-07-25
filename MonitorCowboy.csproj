@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <RootNamespace>MonitorCowboy</RootNamespace>
+    <AssemblyName>MonitorCowboy</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Allows building the Windows TFM on non-Windows dev machines; CI still builds on windows-latest. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      ExcludeAssets=runtime keeps Flow.Launcher.Plugin.dll out of the publish output.
+      The host loads plugins in-process and dedups assemblies by exact FullName
+      (AssemblyVersion included); shipping our own copy would break type identity
+      the moment the host upgrades its SDK. Minimum supported host: Flow Launcher
+      with bundled SDK >= 5.3.1 (v2.1.x+).
+    -->
+    <PackageReference Include="Flow.Launcher.Plugin" Version="5.3.1">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+    <None Include="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Images/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

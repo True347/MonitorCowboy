@@ -1,0 +1,12 @@
+{
+  "ID": "baf19c15c7054fcfb2ad422fb9dc161d",
+  "ActionKeyword": "mc",
+  "Name": "MonitorCowboy",
+  "Description": "Control your monitors over DDC/CI - switch input source and set volume from Flow.",
+  "Author": "True347",
+  "Version": "1.0.0",
+  "Language": "csharp",
+  "Website": "https://github.com/True347/MonitorCowboy",
+  "IcoPath": "Images/app.png",
+  "ExecuteFileName": "MonitorCowboy.dll"
+}

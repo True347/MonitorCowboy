@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build plugin
+        run: dotnet build MonitorCowboy.csproj -c Release
+
+      - name: Run tests
+        run: dotnet test tests/MonitorCowboy.Tests/MonitorCowboy.Tests.csproj -c Release

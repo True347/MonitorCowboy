@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Plain net9.0 on purpose: the suite covers only the pure logic layer
+      (parser, router, models), compiled in by source so it runs on any OS.
+      Windows-only behavior is exercised on real hardware, not here.
+    -->
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>MonitorCowboy.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/Core/**/*.cs" LinkBase="Core" />
+    <Compile Include="../../src/Ui/QueryIntents.cs" Link="Ui/QueryIntents.cs" />
+    <Compile Include="../../src/Ui/QueryRouter.cs" Link="Ui/QueryRouter.cs" Condition="Exists('../../src/Ui/QueryRouter.cs')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>
