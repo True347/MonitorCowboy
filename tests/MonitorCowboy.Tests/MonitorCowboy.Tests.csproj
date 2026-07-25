@@ -16,8 +16,9 @@
 
   <ItemGroup>
     <Compile Include="../../src/Core/**/*.cs" LinkBase="Core" />
+    <Compile Include="../../src/Interop/INativeMonitorApi.cs" Link="Interop/INativeMonitorApi.cs" />
     <Compile Include="../../src/Ui/QueryIntents.cs" Link="Ui/QueryIntents.cs" />
-    <Compile Include="../../src/Ui/QueryRouter.cs" Link="Ui/QueryRouter.cs" Condition="Exists('../../src/Ui/QueryRouter.cs')" />
+    <Compile Include="../../src/Ui/QueryRouter.cs" Link="Ui/QueryRouter.cs" />
   </ItemGroup>
 
   <ItemGroup>
