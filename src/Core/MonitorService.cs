@@ -216,7 +216,7 @@ public sealed class MonitorService : IDisposable
 
             var cachedRaw = _capsStore.TryGet(handle.DevicePath);
             if (cachedRaw is not null && CapabilitiesParser.Parse(cachedRaw) is { } caps)
-                entry.ApplyCapabilities(caps);
+                entry.ApplyCapabilities(caps, notify: false);
 
             var worker = new DdcWorker(
                 _api,

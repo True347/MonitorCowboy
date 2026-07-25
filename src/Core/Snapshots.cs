@@ -13,14 +13,15 @@ public enum CapsState
     Unsupported,
 }
 
-/// <summary>Outcome phases of an in-flight or finished VCP write (§ verify-after-set).</summary>
+/// <summary>
+/// Outcome phases of an in-flight or finished VCP write (verify-after-set).
+/// A verified success is reported by clearing the pending marker and updating
+/// the cached value, so it needs no phase of its own.
+/// </summary>
 public enum OpPhase
 {
     /// <summary>Enqueued or executing; final outcome unknown.</summary>
     Pending,
-
-    /// <summary>Set succeeded and the read-back matched the target.</summary>
-    Applied,
 
     /// <summary>Set was sent but the read-back failed or mismatched (common right after switching inputs away).</summary>
     Unverified,

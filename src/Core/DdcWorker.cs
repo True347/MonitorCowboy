@@ -46,7 +46,7 @@ public sealed class DdcWorker
         if (_signals.Writer.TryWrite(Signal.ReadValues))
             return true;
         // Never let the refresh-in-flight flag stick on a torn-down worker.
-        _entry.EndRefresh(anyReadFailed: true);
+        _entry.CancelRefresh();
         return false;
     }
 
@@ -59,10 +59,18 @@ public sealed class DdcWorker
     /// </summary>
     public void RequestWrite(byte code, uint target)
     {
-        _pendingWrites[code] = target;
+        // Badge before publishing: once the consumer observes the dictionary
+        // entry it must also observe the Pending marker, or the outcome it
+        // reports through FinishPendingWrite would find no marker and be lost.
         _entry.SetPendingWrite(code, new PendingWrite(target, OpPhase.Pending));
+        _pendingWrites[code] = target;
         if (!_signals.Writer.TryWrite(Signal.Write))
+        {
+            // Worker already completed: withdraw the op so a still-draining
+            // consumer cannot send it mid-teardown, then report honestly.
+            _pendingWrites.TryRemove(new KeyValuePair<byte, uint>(code, target));
             _entry.SetPendingWrite(code, new PendingWrite(target, OpPhase.Failed));
+        }
     }
 
     /// <summary>Stop accepting work. Queued-but-unexecuted ops end as failed; delays are cut short.</summary>
@@ -128,7 +136,10 @@ public sealed class DdcWorker
     {
         if (_entry.CapsState != CapsState.Ready)
         {
-            _entry.EndRefresh(anyReadFailed: false);
+            // No read happened — clear the flag without touching the TTL
+            // timestamp, or a real refresh would be masked for a whole TTL
+            // once capabilities become ready.
+            _entry.CancelRefresh();
             return;
         }
 

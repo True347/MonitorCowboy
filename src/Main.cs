@@ -23,6 +23,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     private DateTime _lastQueryAtUtc = DateTime.MinValue;
     private DateTime _lastPushRefreshUtc = DateTime.MinValue;
     private bool _pushRefreshInduced;
+    private bool _initFailed;
 
     public Task InitAsync(PluginInitContext context)
     {
@@ -31,17 +32,37 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         if (!OperatingSystem.IsWindows())
             return Task.CompletedTask;
 
-        var settings = context.API.LoadSettingJsonStorage<PluginSettings>();
-        var store = new FlowCapsStore(settings, () => context.API.SaveSettingJsonStorage<PluginSettings>());
+        try
+        {
+            PluginSettings settings;
+            try
+            {
+                settings = context.API.LoadSettingJsonStorage<PluginSettings>();
+            }
+            catch (Exception ex)
+            {
+                // A corrupt settings file must not brick the plugin; the caps
+                // cache is best-effort by design.
+                LogError("Settings load failed; starting with an empty caps cache", ex);
+                settings = new PluginSettings();
+            }
 
-        _service = new MonitorService(new RealNativeMonitorApi(), store, LogError);
-        _service.StateChanged += OnServiceStateChanged;
-        _service.WriteFailed += OnWriteFailed;
-        _service.Initialize();
+            var store = new FlowCapsStore(settings, () => context.API.SaveSettingJsonStorage<PluginSettings>());
 
-        _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory);
-        _watcher = new TopologyWatcher(OnTopologyChanged);
-        _deferredRefresh = new Timer(_ => TryPushRefresh(fromTimer: true), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _service = new MonitorService(new RealNativeMonitorApi(), store, LogError);
+            _service.StateChanged += OnServiceStateChanged;
+            _service.WriteFailed += OnWriteFailed;
+            _service.Initialize();
+
+            _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory);
+            _watcher = new TopologyWatcher(OnTopologyChanged);
+            _deferredRefresh = new Timer(_ => TryPushRefresh(fromTimer: true), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        }
+        catch (Exception ex)
+        {
+            LogError("Initialization failed", ex);
+            _initFailed = true;
+        }
 
         return Task.CompletedTask;
     }
@@ -59,9 +80,11 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 {
                     new()
                     {
-                        Title = "MonitorCowboy requires Windows",
-                        SubTitle = "DDC/CI monitor control is only available on Windows.",
-                        IcoPath = "Images/warning.png",
+                        Title = _initFailed ? "MonitorCowboy failed to initialize" : "MonitorCowboy requires Windows",
+                        SubTitle = _initFailed
+                            ? "See the Flow Launcher log for details, then try Reload Plugin Data."
+                            : "DDC/CI monitor control is only available on Windows.",
+                        IcoPath = _initFailed ? "Images/error.png" : "Images/warning.png",
                         AddSelectedCount = false,
                     },
                 });
@@ -131,16 +154,19 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         _watcher?.Dispose();
         _watcher = null;
 
-        _deferredRefresh?.Dispose();
-        _deferredRefresh = null;
-
+        // Unsubscribe before touching the timer: a worker still in
+        // OnServiceStateChanged must not race a disposed timer.
         if (_service is not null)
         {
             _service.StateChanged -= OnServiceStateChanged;
             _service.WriteFailed -= OnWriteFailed;
-            _service.Dispose();
-            _service = null;
         }
+
+        _deferredRefresh?.Dispose();
+        _deferredRefresh = null;
+
+        _service?.Dispose();
+        _service = null;
     }
 
     private void OnTopologyChanged()
@@ -223,7 +249,16 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 // Trailing edge: never drop the final state transition (e.g.
                 // Applying… -> ✓); re-fire once the throttle window has passed.
                 if (!fromTimer)
-                    _deferredRefresh?.Change(PushRefreshThrottle - sinceLast, Timeout.InfiniteTimeSpan);
+                {
+                    try
+                    {
+                        _deferredRefresh?.Change(PushRefreshThrottle - sinceLast, Timeout.InfiniteTimeSpan);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Raced plugin disposal; nothing left to refresh.
+                    }
+                }
                 return;
             }
 

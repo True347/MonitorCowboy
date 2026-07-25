@@ -83,7 +83,7 @@ public sealed class ResultFactory
                 $"{m.Index}  {m.FriendlyName}",
                 StatusLine(m),
                 IconMonitor,
-                100 - (m.Index - 1) * 10,
+                Math.Max(1, 100 - (m.Index - 1) * 10),
                 target,
                 _ => { _api.ChangeQuery(target, true); return false; },
                 contextData: m.DevicePath));

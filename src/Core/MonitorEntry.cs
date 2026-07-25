@@ -41,14 +41,20 @@ public sealed class MonitorEntry
     public bool SupportsVolume { get { lock (_gate) return _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false; } }
     public DateTime LastValuesReadUtc { get { lock (_gate) return _lastValuesReadUtc; } }
 
-    public void ApplyCapabilities(ParsedCapabilities caps)
+    /// <summary>
+    /// <paramref name="notify"/> is false only when seeding from the persisted
+    /// cache during a rebuild — the monitor list is unpublished at that point,
+    /// and a change event would push-refresh the UI against an empty list.
+    /// </summary>
+    public void ApplyCapabilities(ParsedCapabilities caps, bool notify = true)
     {
         lock (_gate)
         {
             _caps = caps;
             _capsState = CapsState.Ready;
         }
-        _onChanged(this);
+        if (notify)
+            _onChanged(this);
     }
 
     public void MarkCapsUnsupported()
@@ -118,6 +124,14 @@ public sealed class MonitorEntry
                 _valuesStale = true;
             _lastValuesReadUtc = DateTime.UtcNow;
         }
+        _onChanged(this);
+    }
+
+    /// <summary>Clears the refresh flag without touching the TTL timestamp (no read actually ran).</summary>
+    public void CancelRefresh()
+    {
+        lock (_gate)
+            _refreshInFlight = false;
         _onChanged(this);
     }
 

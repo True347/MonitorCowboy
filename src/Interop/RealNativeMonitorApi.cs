@@ -19,12 +19,17 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
 {
     public IReadOnlyList<PhysicalMonitorHandle> EnumerateMonitors()
     {
+        var result = new List<PhysicalMonitorHandle>();
         try
         {
-            return EnumerateCore();
+            EnumerateCore(result);
+            return result;
         }
         catch
         {
+            // Never leak handles acquired before the failure.
+            foreach (var acquired in result)
+                DestroyMonitor(acquired.Handle);
             return [];
         }
     }
@@ -90,7 +95,7 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
         }
     }
 
-    private static List<PhysicalMonitorHandle> EnumerateCore()
+    private static void EnumerateCore(List<PhysicalMonitorHandle> result)
     {
         var hmonitors = new List<(nint Handle, string GdiName)>();
         NativeMethods.MonitorEnumProc callback = (hMonitor, _, _, _) =>
@@ -114,7 +119,6 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
         GC.KeepAlive(callback);
 
         var targetsBySource = QueryTargets();
-        var result = new List<PhysicalMonitorHandle>();
 
         foreach (var (hMonitor, gdiName) in hmonitors)
         {
@@ -148,8 +152,6 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
                     target?.IsInternal ?? false));
             }
         }
-
-        return result;
     }
 
     private sealed record TargetInfo(string DevicePath, string FriendlyName, bool IsInternal);
