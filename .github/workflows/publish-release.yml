@@ -9,6 +9,7 @@ on:
       - 'tests/**'
       - 'tools/**'
       - '.github/**'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -38,6 +39,7 @@ jobs:
         run: |
           gh release view "v${{ steps.version.outputs.version }}" *> $null
           if ($LASTEXITCODE -eq 0) { "publish=false" >> $env:GITHUB_OUTPUT } else { "publish=true" >> $env:GITHUB_OUTPUT }
+          exit 0  # gh exiting 1 for "no such release" must not fail the gate step
 
       - name: Run tests
         if: steps.gate.outputs.publish == 'true'
