@@ -160,12 +160,28 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
     {
         var map = new Dictionary<string, List<TargetInfo>>(StringComparer.OrdinalIgnoreCase);
 
-        if (NativeMethods.GetDisplayConfigBufferSizes(NativeMethods.QdcOnlyActivePaths, out var pathCount, out var modeCount) != 0)
-            return map;
+        uint pathCount = 0;
+        NativeMethods.DISPLAYCONFIG_PATH_INFO[]? paths = null;
 
-        var paths = new NativeMethods.DISPLAYCONFIG_PATH_INFO[pathCount];
-        var modes = new NativeMethods.DISPLAYCONFIG_MODE_INFO[modeCount];
-        if (NativeMethods.QueryDisplayConfig(NativeMethods.QdcOnlyActivePaths, ref pathCount, paths, ref modeCount, modes, 0) != 0)
+        // The topology can change between sizing and querying; retry on the
+        // resulting ERROR_INSUFFICIENT_BUFFER (122) like the SDK samples do.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (NativeMethods.GetDisplayConfigBufferSizes(NativeMethods.QdcOnlyActivePaths, out pathCount, out var modeCount) != 0)
+                return map;
+
+            paths = new NativeMethods.DISPLAYCONFIG_PATH_INFO[pathCount];
+            var modes = new NativeMethods.DISPLAYCONFIG_MODE_INFO[modeCount];
+            var rc = NativeMethods.QueryDisplayConfig(NativeMethods.QdcOnlyActivePaths, ref pathCount, paths, ref modeCount, modes, 0);
+            if (rc == 0)
+                break;
+
+            paths = null;
+            if (rc != 122)
+                return map;
+        }
+
+        if (paths is null)
             return map;
 
         for (var i = 0; i < pathCount; i++)

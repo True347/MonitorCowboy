@@ -91,6 +91,7 @@ public sealed class DdcWorker
             {
                 while (_signals.Reader.TryRead(out var signal))
                 {
+                    var didIo = false;
                     try
                     {
                         switch (signal)
@@ -98,12 +99,13 @@ public sealed class DdcWorker
                             case Signal.ReadCapabilities:
                                 ExecuteReadCapabilities();
                                 ExecuteReadValues();
+                                didIo = true;
                                 break;
                             case Signal.ReadValues:
-                                ExecuteReadValues();
+                                didIo = ExecuteReadValues();
                                 break;
                             case Signal.Write:
-                                await ExecuteWritesAsync(ct).ConfigureAwait(false);
+                                didIo = await ExecuteWritesAsync(ct).ConfigureAwait(false);
                                 break;
                         }
                     }
@@ -118,7 +120,11 @@ public sealed class DdcWorker
                         // must not kill the monitor's DDC pump.
                     }
 
-                    await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
+                    // Only pace actual bus traffic. A burst of coalesced write
+                    // signals leaves a tail of no-op drains that must not
+                    // head-of-line block later ops for 75 ms each.
+                    if (didIo)
+                        await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
                 }
             }
         }
@@ -147,7 +153,7 @@ public sealed class DdcWorker
         }
     }
 
-    private void ExecuteReadValues()
+    private bool ExecuteReadValues()
     {
         if (_entry.CapsState != CapsState.Ready)
         {
@@ -155,7 +161,7 @@ public sealed class DdcWorker
             // timestamp, or a real refresh would be masked for a whole TTL
             // once capabilities become ready.
             _entry.CancelRefresh();
-            return;
+            return false;
         }
 
         var anyFailed = false;
@@ -177,25 +183,32 @@ public sealed class DdcWorker
         }
 
         _entry.EndRefresh(anyFailed);
+        return true;
     }
 
-    private async Task ExecuteWritesAsync(CancellationToken ct)
+    private async Task<bool> ExecuteWritesAsync(CancellationToken ct)
     {
+        var any = false;
         foreach (var code in _pendingWrites.Keys.ToArray())
         {
             if (!_pendingWrites.TryRemove(code, out var target))
                 continue;
 
+            any = true;
             await ExecuteOneWriteAsync(code, target, ct).ConfigureAwait(false);
         }
+
+        return any;
     }
 
     private async Task ExecuteOneWriteAsync(byte code, uint target, CancellationToken ct)
     {
         if (!_api.TrySetVcpFeature(_entry.Handle, code, target))
         {
-            _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed));
-            _onWriteFailed?.Invoke(code, target);
+            // Toast only when the failure was actually recorded — a newer
+            // write may have superseded this target already.
+            if (_entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed)))
+                _onWriteFailed?.Invoke(code, target);
             return;
         }
 

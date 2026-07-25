@@ -153,9 +153,10 @@ public sealed class MonitorEntry
     /// <summary>
     /// Records the outcome of a finished write, but only while the marker still
     /// belongs to that write — a newer queued write's Pending badge must not be
-    /// overwritten by an older write's outcome.
+    /// overwritten by an older write's outcome. Returns whether the outcome was
+    /// actually applied, so callers can suppress stale failure notifications.
     /// </summary>
-    public void FinishPendingWrite(byte code, uint target, PendingWrite? outcome)
+    public bool FinishPendingWrite(byte code, uint target, PendingWrite? outcome)
     {
         var changed = false;
         lock (_gate)
@@ -179,6 +180,7 @@ public sealed class MonitorEntry
         }
         if (changed)
             _onChanged(this);
+        return changed;
     }
 
     public IReadOnlyList<uint> InputValues
