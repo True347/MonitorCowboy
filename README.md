@@ -41,9 +41,9 @@ launch.
 
 ## Install
 
-From the Flow Launcher plugin store (`pm install MonitorCowboy`), or manually:
-`pm install <release zip URL>` using the latest
-[release](https://github.com/True347/MonitorCowboy/releases).
+Download the zip from the latest
+[release](https://github.com/True347/MonitorCowboy/releases) and install it
+with Flow Launcher's plugin manager: `pm install <release zip URL or local path>`.
 
 ## Building from source
 
