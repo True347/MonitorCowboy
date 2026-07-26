@@ -53,8 +53,8 @@ public class MonitorServiceTests
         {
             MonitorsToEnumerate =
             [
-                new PhysicalMonitorHandle(1, @"\\?\DISPLAY#EXT#1", "External Monitor", IsInternal: false),
-                new PhysicalMonitorHandle(2, @"\\?\DISPLAY#INT#1", "Internal Panel", IsInternal: true),
+                new PhysicalMonitorInfo(new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#EXT#1", "External Monitor", IsInternal: false),
+                new PhysicalMonitorInfo(new MonitorRef(@"\\.\DISPLAY2", 0), @"\\?\DISPLAY#INT#1", "Internal Panel", IsInternal: true),
             ],
         };
         api.SetValue(Vcp.InputSource, 0x0F, 0);
@@ -70,7 +70,6 @@ public class MonitorServiceTests
         var only = Assert.Single(snapshots);
         Assert.Equal("External Monitor", only.FriendlyName);
         Assert.Equal(CapsState.Ready, only.CapsState); // seeded from the persisted cache
-        Assert.Equal(1, api.DestroyedCount);           // the internal panel's handle was released
 
         // Warm-up runs in the background and fills in current values.
         await WaitUntilAsync(() => service.GetSnapshots()[0] is { CurrentInput: 0x0Fu, CurrentVolume: 45u, VolumeMax: 100u });
@@ -85,7 +84,7 @@ public class MonitorServiceTests
         {
             MonitorsToEnumerate =
             [
-                new PhysicalMonitorHandle(1, @"\\?\DISPLAY#EXT#1", "External Monitor", IsInternal: false),
+                new PhysicalMonitorInfo(new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#EXT#1", "External Monitor", IsInternal: false),
             ],
             Capabilities = Caps,
         };

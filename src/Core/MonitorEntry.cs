@@ -1,3 +1,5 @@
+using MonitorCowboy.Interop;
+
 namespace MonitorCowboy.Core;
 
 /// <summary>
@@ -22,10 +24,10 @@ public sealed class MonitorEntry
     private PendingWrite? _pendingInput;
     private PendingWrite? _pendingVolume;
 
-    public MonitorEntry(int index, nint handle, string devicePath, string friendlyName, Action<MonitorEntry> onChanged)
+    public MonitorEntry(int index, MonitorRef monitorRef, string devicePath, string friendlyName, Action<MonitorEntry> onChanged)
     {
         Index = index;
-        Handle = handle;
+        Ref = monitorRef;
         DevicePath = devicePath;
         FriendlyName = friendlyName;
         _onChanged = onChanged;
@@ -33,7 +35,7 @@ public sealed class MonitorEntry
     }
 
     public int Index { get; }
-    public nint Handle { get; }
+    public MonitorRef Ref { get; }
     public string DevicePath { get; }
     public string FriendlyName { get; }
 

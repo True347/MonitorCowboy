@@ -7,12 +7,10 @@ namespace MonitorCowboy.Core;
 /// <summary>
 /// Serializes all DDC/CI traffic for one physical monitor. Windows provides no
 /// serialization of its own, so every operation for a monitor funnels through
-/// this worker's single consumer task.
-///
-/// The worker owns the physical monitor handle exclusively. Teardown order:
-/// <see cref="Complete"/> -> await <see cref="Completion"/> -> the consumer
-/// destroys the handle on its way out. Enqueueing after completion reports the
-/// op as failed instead of throwing.
+/// this worker's single consumer task. No handle is held: the interop layer
+/// acquires one fresh per operation. Teardown order: <see cref="Complete"/> ->
+/// await <see cref="Completion"/>. Enqueueing after completion reports the op
+/// as failed instead of throwing.
 /// </summary>
 public sealed class DdcWorker
 {
@@ -144,7 +142,6 @@ public sealed class DdcWorker
         finally
         {
             FailRemainingWrites();
-            _api.DestroyMonitor(_entry.Handle);
         }
     }
 
@@ -152,7 +149,7 @@ public sealed class DdcWorker
     {
         for (var attempt = 1; attempt <= CapsReadAttempts; attempt++)
         {
-            if (_api.TryGetCapabilitiesString(_entry.Handle, out var raw))
+            if (_api.TryGetCapabilitiesString(_entry.Ref, out var raw))
             {
                 if (CapabilitiesParser.Parse(raw) is { } caps)
                 {
@@ -197,7 +194,7 @@ public sealed class DdcWorker
     {
         for (var attempt = 1; attempt <= 2; attempt++)
         {
-            if (_api.TryGetVcpFeature(_entry.Handle, code, out _, out _))
+            if (_api.TryGetVcpFeature(_entry.Ref, code, out _, out _))
                 return true;
             await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
         }
@@ -220,7 +217,7 @@ public sealed class DdcWorker
 
         if (_entry.SupportsInput)
         {
-            if (_api.TryGetVcpFeature(_entry.Handle, Vcp.InputSource, out var input, out _))
+            if (_api.TryGetVcpFeature(_entry.Ref, Vcp.InputSource, out var input, out _))
                 _entry.ApplyReadValue(Vcp.InputSource, input, 0);
             else
                 anyFailed = true;
@@ -228,7 +225,7 @@ public sealed class DdcWorker
 
         if (_entry.SupportsVolume)
         {
-            if (_api.TryGetVcpFeature(_entry.Handle, Vcp.AudioSpeakerVolume, out var volume, out var max))
+            if (_api.TryGetVcpFeature(_entry.Ref, Vcp.AudioSpeakerVolume, out var volume, out var max))
                 _entry.ApplyReadValue(Vcp.AudioSpeakerVolume, volume, max);
             else
                 anyFailed = true;
@@ -255,7 +252,7 @@ public sealed class DdcWorker
 
     private async Task ExecuteOneWriteAsync(byte code, uint target, CancellationToken ct)
     {
-        if (!_api.TrySetVcpFeature(_entry.Handle, code, target))
+        if (!_api.TrySetVcpFeature(_entry.Ref, code, target))
         {
             // Toast only when the failure was actually recorded — a newer
             // write may have superseded this target already.
@@ -270,7 +267,7 @@ public sealed class DdcWorker
 
         for (var attempt = 1; attempt <= VerifyAttempts; attempt++)
         {
-            if (_api.TryGetVcpFeature(_entry.Handle, code, out var current, out var max))
+            if (_api.TryGetVcpFeature(_entry.Ref, code, out var current, out var max))
             {
                 var matches = code == Vcp.InputSource
                     ? InputSourceNames.SameInput(current, target)

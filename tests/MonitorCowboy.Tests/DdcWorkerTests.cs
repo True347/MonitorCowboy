@@ -1,4 +1,5 @@
 using MonitorCowboy.Core;
+using MonitorCowboy.Interop;
 using Xunit;
 
 namespace MonitorCowboy.Tests;
@@ -9,7 +10,7 @@ public class DdcWorkerTests
 
     private static MonitorEntry NewReadyEntry()
     {
-        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var entry = new MonitorEntry(1, new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         entry.ApplyCapabilities(CapabilitiesParser.Parse(CapsWithInputAndVolume)!);
         return entry;
     }
@@ -117,7 +118,7 @@ public class DdcWorkerTests
     }
 
     [Fact]
-    public async Task Complete_DestroysHandle_AndFailsLateWrites()
+    public async Task Complete_FailsLateWritesHonestly()
     {
         var api = new FakeNativeMonitorApi();
         var entry = NewReadyEntry();
@@ -125,7 +126,6 @@ public class DdcWorkerTests
 
         worker.Complete();
         await worker.Completion;
-        Assert.Equal(1, api.DestroyedCount);
 
         worker.RequestWrite(Vcp.AudioSpeakerVolume, 30);
         Assert.True(entry.BuildSnapshot().PendingVolume is { Phase: OpPhase.Failed, Target: 30u });
@@ -136,7 +136,7 @@ public class DdcWorkerTests
     public async Task Refresh_CapsNotReady_ClearsFlagWithoutTouchingTtl()
     {
         var api = new FakeNativeMonitorApi();
-        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var entry = new MonitorEntry(1, new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         var worker = new DdcWorker(api, entry, null, null);
 
         Assert.True(entry.TryBeginRefresh());
@@ -172,7 +172,7 @@ public class DdcWorkerTests
     public async Task ReadCapabilities_FirstSightFailure_NoVcpAnswer_MarksUnsupported()
     {
         var api = new FakeNativeMonitorApi { Capabilities = null, FailGet = true };
-        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var entry = new MonitorEntry(1, new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         var worker = new DdcWorker(api, entry, null, null);
 
         worker.RequestReadCapabilities();
@@ -191,7 +191,7 @@ public class DdcWorkerTests
         var api = new FakeNativeMonitorApi { Capabilities = null };
         api.SetValue(Vcp.InputSource, 0x11, 0);
         api.SetValue(Vcp.AudioSpeakerVolume, 45, 100);
-        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var entry = new MonitorEntry(1, new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         var worker = new DdcWorker(api, entry, null, null);
 
         worker.RequestReadCapabilities();
@@ -216,7 +216,7 @@ public class DdcWorkerTests
     {
         var api = new FakeNativeMonitorApi { Capabilities = null };
         api.SetValue(Vcp.AudioSpeakerVolume, 45, 100); // input probe will fail (no value stored)
-        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var entry = new MonitorEntry(1, new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         var worker = new DdcWorker(api, entry, null, null);
 
         worker.RequestReadCapabilities();
@@ -239,7 +239,7 @@ public class DdcWorkerTests
         var api = new FakeNativeMonitorApi { Capabilities = CapsWithInputAndVolume };
         api.SetValue(Vcp.InputSource, 0x11, 0);
         api.SetValue(Vcp.AudioSpeakerVolume, 45, 100);
-        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var entry = new MonitorEntry(1, new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         var worker = new DdcWorker(api, entry, null, null);
 
         worker.RequestReadCapabilities();

@@ -216,19 +216,16 @@ public sealed class MonitorService : IDisposable
         var result = new List<(MonitorEntry, DdcWorker)>();
         var index = 0;
 
-        foreach (var handle in _api.EnumerateMonitors())
+        foreach (var monitor in _api.EnumerateMonitors())
         {
-            if (handle.IsInternal)
-            {
-                // Internal panels do not speak DDC/CI; release the handle instead of leaking it.
-                _api.DestroyMonitor(handle.Handle);
+            // Internal panels do not speak DDC/CI.
+            if (monitor.IsInternal)
                 continue;
-            }
 
             index++;
-            var entry = new MonitorEntry(index, handle.Handle, handle.DevicePath, handle.FriendlyName, OnEntryChanged);
+            var entry = new MonitorEntry(index, monitor.Ref, monitor.DevicePath, monitor.FriendlyName, OnEntryChanged);
 
-            var cachedRaw = _capsStore.TryGet(handle.DevicePath);
+            var cachedRaw = _capsStore.TryGet(monitor.DevicePath);
             if (cachedRaw is not null && CapabilitiesParser.Parse(cachedRaw) is { } caps)
                 entry.ApplyCapabilities(caps, notify: false);
 

@@ -11,7 +11,6 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
     private readonly object _gate = new();
     private readonly Dictionary<byte, (uint Current, uint Max)> _values = new();
     private readonly List<(byte Code, uint Value)> _setCalls = [];
-    private int _destroyed;
 
     public bool FailSet { get; set; }
     public bool FailGet { get; set; }
@@ -24,9 +23,7 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
 
     public string? Capabilities { get; set; }
 
-    public IReadOnlyList<PhysicalMonitorHandle> MonitorsToEnumerate { get; set; } = [];
-
-    public int DestroyedCount => Volatile.Read(ref _destroyed);
+    public IReadOnlyList<PhysicalMonitorInfo> MonitorsToEnumerate { get; set; } = [];
 
     public int LastWin32Error => 0;
 
@@ -41,9 +38,9 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
             _values[code] = (current, max);
     }
 
-    public IReadOnlyList<PhysicalMonitorHandle> EnumerateMonitors() => MonitorsToEnumerate;
+    public IReadOnlyList<PhysicalMonitorInfo> EnumerateMonitors() => MonitorsToEnumerate;
 
-    public bool TryGetVcpFeature(nint handle, byte code, out uint currentValue, out uint maximumValue)
+    public bool TryGetVcpFeature(MonitorRef monitor, byte code, out uint currentValue, out uint maximumValue)
     {
         currentValue = 0;
         maximumValue = 0;
@@ -60,7 +57,7 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
         }
     }
 
-    public bool TrySetVcpFeature(nint handle, byte code, uint value)
+    public bool TrySetVcpFeature(MonitorRef monitor, byte code, uint value)
     {
         BeforeSet?.Invoke();
 
@@ -78,11 +75,9 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
         }
     }
 
-    public bool TryGetCapabilitiesString(nint handle, out string capabilities)
+    public bool TryGetCapabilitiesString(MonitorRef monitor, out string capabilities)
     {
         capabilities = Capabilities ?? "";
         return Capabilities is not null;
     }
-
-    public void DestroyMonitor(nint handle) => Interlocked.Increment(ref _destroyed);
 }

@@ -13,6 +13,12 @@ namespace MonitorCowboy.Interop;
 /// device name (MONITORINFOEX.szDevice == viewGdiDeviceName). Targets under
 /// one source are paired with the physical monitor array index-wise, which
 /// also covers clone mode (one source, several targets).
+///
+/// Handle policy: physical monitor handles are acquired fresh for every
+/// operation and destroyed before it returns. Long-lived handles acquired at
+/// startup have been observed to go permanently stale on some driver stacks
+/// (every exchange failing with I2C error 0xC0262582 while other tools using
+/// fresh handles work) — matching how the mature DDC tools operate.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class RealNativeMonitorApi : INativeMonitorApi
@@ -20,116 +26,154 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
     // Process-wide DDC serialization. Concurrent DDC/CI traffic to DIFFERENT
     // monitors is not safe either: displays on the same adapter (and monitors
     // daisy-chained over DisplayPort MST) share I2C/aux plumbing, and parallel
-    // exchanges corrupt each other. Field-verified: parallel per-monitor
-    // workers made capability reads and VCP probes fail on monitors that
-    // answer perfectly when addressed one at a time.
+    // exchanges corrupt each other.
     private static readonly object DdcGate = new();
 
     public int LastWin32Error { get; private set; }
 
-    public IReadOnlyList<PhysicalMonitorHandle> EnumerateMonitors()
+    public IReadOnlyList<PhysicalMonitorInfo> EnumerateMonitors()
     {
-        var result = new List<PhysicalMonitorHandle>();
         try
         {
-            EnumerateCore(result);
-            return result;
+            return EnumerateCore();
         }
         catch
         {
-            // Never leak handles acquired before the failure.
-            foreach (var acquired in result)
-                DestroyMonitor(acquired.Handle);
             return [];
         }
     }
 
-    public bool TryGetVcpFeature(nint handle, byte code, out uint currentValue, out uint maximumValue)
+    public bool TryGetVcpFeature(MonitorRef monitor, byte code, out uint currentValue, out uint maximumValue)
     {
-        currentValue = 0;
-        maximumValue = 0;
-        try
+        uint current = 0;
+        uint maximum = 0;
+        var ok = WithMonitorHandle(monitor, handle =>
         {
-            lock (DdcGate)
+            if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(handle, code, 0, out current, out maximum))
+                return true;
+            LastWin32Error = Marshal.GetLastWin32Error();
+            return false;
+        });
+
+        currentValue = current;
+        maximumValue = maximum;
+        return ok;
+    }
+
+    public bool TrySetVcpFeature(MonitorRef monitor, byte code, uint value)
+    {
+        return WithMonitorHandle(monitor, handle =>
+        {
+            if (NativeMethods.SetVCPFeature(handle, code, value))
+                return true;
+            LastWin32Error = Marshal.GetLastWin32Error();
+            return false;
+        });
+    }
+
+    public bool TryGetCapabilitiesString(MonitorRef monitor, out string capabilities)
+    {
+        var caps = "";
+        var ok = WithMonitorHandle(monitor, handle =>
+        {
+            if (!NativeMethods.GetCapabilitiesStringLength(handle, out var length) || length == 0)
             {
-                if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(handle, code, 0, out currentValue, out maximumValue))
-                    return true;
                 LastWin32Error = Marshal.GetLastWin32Error();
                 return false;
             }
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
-    public bool TrySetVcpFeature(nint handle, byte code, uint value)
-    {
-        try
-        {
-            lock (DdcGate)
+            var buffer = new byte[length];
+            if (!NativeMethods.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length))
             {
-                if (NativeMethods.SetVCPFeature(handle, code, value))
-                    return true;
                 LastWin32Error = Marshal.GetLastWin32Error();
                 return false;
             }
-        }
-        catch
-        {
-            return false;
-        }
+
+            var terminator = Array.IndexOf(buffer, (byte)0);
+            caps = Encoding.ASCII.GetString(buffer, 0, terminator >= 0 ? terminator : buffer.Length);
+            return caps.Length > 0;
+        });
+
+        capabilities = caps;
+        return ok;
     }
 
-    public bool TryGetCapabilitiesString(nint handle, out string capabilities)
+    /// <summary>
+    /// Acquire the referenced monitor's handle fresh, run the operation under
+    /// the process-wide DDC gate, and always destroy every acquired handle.
+    /// </summary>
+    private bool WithMonitorHandle(MonitorRef monitor, Func<nint, bool> operation)
     {
-        capabilities = "";
         try
         {
             lock (DdcGate)
             {
-                if (!NativeMethods.GetCapabilitiesStringLength(handle, out var length) || length == 0)
+                var hMonitor = FindHmonitor(monitor.GdiDeviceName);
+                if (hMonitor == 0)
+                    return false;
+
+                if (!NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out var count) || count == 0)
                 {
                     LastWin32Error = Marshal.GetLastWin32Error();
                     return false;
                 }
 
-                var buffer = new byte[length];
-                if (!NativeMethods.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length))
+                if (monitor.Index >= count)
+                    return false;
+
+                var physicals = new NativeMethods.PHYSICAL_MONITOR[count];
+                if (!NativeMethods.GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicals))
                 {
                     LastWin32Error = Marshal.GetLastWin32Error();
                     return false;
                 }
 
-                var terminator = Array.IndexOf(buffer, (byte)0);
-                capabilities = Encoding.ASCII.GetString(buffer, 0, terminator >= 0 ? terminator : buffer.Length);
-                return capabilities.Length > 0;
+                try
+                {
+                    return operation(physicals[monitor.Index].hPhysicalMonitor);
+                }
+                finally
+                {
+                    foreach (var physical in physicals)
+                        NativeMethods.DestroyPhysicalMonitor(physical.hPhysicalMonitor);
+                }
             }
         }
         catch
         {
-            capabilities = "";
             return false;
         }
     }
 
-    public void DestroyMonitor(nint handle)
+    private static nint FindHmonitor(string gdiDeviceName)
     {
-        try
+        nint found = 0;
+        NativeMethods.MonitorEnumProc callback = (hMonitor, _, _, _) =>
         {
-            lock (DdcGate)
+            try
             {
-                NativeMethods.DestroyPhysicalMonitor(handle);
+                var info = new NativeMethods.MONITORINFOEX
+                {
+                    cbSize = (uint)Marshal.SizeOf<NativeMethods.MONITORINFOEX>(),
+                };
+                if (NativeMethods.GetMonitorInfoW(hMonitor, ref info)
+                    && string.Equals(info.szDevice, gdiDeviceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    found = hMonitor;
+                }
             }
-        }
-        catch
-        {
-            // Handle cleanup is best-effort.
-        }
+            catch
+            {
+                // An exception must never cross the native callback boundary.
+            }
+            return true;
+        };
+        NativeMethods.EnumDisplayMonitors(0, 0, callback, 0);
+        GC.KeepAlive(callback);
+        return found;
     }
 
-    private static void EnumerateCore(List<PhysicalMonitorHandle> result)
+    private static List<PhysicalMonitorInfo> EnumerateCore()
     {
         var hmonitors = new List<(nint Handle, string GdiName)>();
         NativeMethods.MonitorEnumProc callback = (hMonitor, _, _, _) =>
@@ -153,25 +197,20 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
         GC.KeepAlive(callback);
 
         var targetsBySource = QueryTargets();
+        var result = new List<PhysicalMonitorInfo>();
 
         foreach (var (hMonitor, gdiName) in hmonitors)
         {
             if (!NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out var count) || count == 0)
                 continue;
 
-            var physicals = new NativeMethods.PHYSICAL_MONITOR[count];
-            if (!NativeMethods.GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicals))
-                continue;
-
             targetsBySource.TryGetValue(gdiName, out var targets);
 
-            for (var i = 0; i < physicals.Length; i++)
+            for (var i = 0; i < count; i++)
             {
                 var target = targets is not null && i < targets.Count ? targets[i] : null;
 
                 var friendly = target?.FriendlyName;
-                if (string.IsNullOrWhiteSpace(friendly))
-                    friendly = physicals[i].szPhysicalMonitorDescription?.Trim();
                 if (string.IsNullOrWhiteSpace(friendly))
                     friendly = $"Display {result.Count + 1}";
 
@@ -179,13 +218,15 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
                 if (string.IsNullOrWhiteSpace(devicePath))
                     devicePath = $"{gdiName}#{i}";
 
-                result.Add(new PhysicalMonitorHandle(
-                    physicals[i].hPhysicalMonitor,
+                result.Add(new PhysicalMonitorInfo(
+                    new MonitorRef(gdiName, i),
                     devicePath,
                     friendly,
                     target?.IsInternal ?? false));
             }
         }
+
+        return result;
     }
 
     private sealed record TargetInfo(string DevicePath, string FriendlyName, bool IsInternal);
