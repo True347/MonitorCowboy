@@ -28,6 +28,8 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
 
     public int DestroyedCount => Volatile.Read(ref _destroyed);
 
+    public int LastWin32Error => 0;
+
     public IReadOnlyList<(byte Code, uint Value)> SetCalls
     {
         get { lock (_gate) return _setCalls.ToArray(); }

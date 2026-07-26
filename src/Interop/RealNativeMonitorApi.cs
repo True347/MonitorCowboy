@@ -17,6 +17,16 @@ namespace MonitorCowboy.Interop;
 [SupportedOSPlatform("windows")]
 public sealed class RealNativeMonitorApi : INativeMonitorApi
 {
+    // Process-wide DDC serialization. Concurrent DDC/CI traffic to DIFFERENT
+    // monitors is not safe either: displays on the same adapter (and monitors
+    // daisy-chained over DisplayPort MST) share I2C/aux plumbing, and parallel
+    // exchanges corrupt each other. Field-verified: parallel per-monitor
+    // workers made capability reads and VCP probes fail on monitors that
+    // answer perfectly when addressed one at a time.
+    private static readonly object DdcGate = new();
+
+    public int LastWin32Error { get; private set; }
+
     public IReadOnlyList<PhysicalMonitorHandle> EnumerateMonitors()
     {
         var result = new List<PhysicalMonitorHandle>();
@@ -40,7 +50,13 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
         maximumValue = 0;
         try
         {
-            return NativeMethods.GetVCPFeatureAndVCPFeatureReply(handle, code, 0, out currentValue, out maximumValue);
+            lock (DdcGate)
+            {
+                if (NativeMethods.GetVCPFeatureAndVCPFeatureReply(handle, code, 0, out currentValue, out maximumValue))
+                    return true;
+                LastWin32Error = Marshal.GetLastWin32Error();
+                return false;
+            }
         }
         catch
         {
@@ -52,7 +68,13 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
     {
         try
         {
-            return NativeMethods.SetVCPFeature(handle, code, value);
+            lock (DdcGate)
+            {
+                if (NativeMethods.SetVCPFeature(handle, code, value))
+                    return true;
+                LastWin32Error = Marshal.GetLastWin32Error();
+                return false;
+            }
         }
         catch
         {
@@ -65,16 +87,25 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
         capabilities = "";
         try
         {
-            if (!NativeMethods.GetCapabilitiesStringLength(handle, out var length) || length == 0)
-                return false;
+            lock (DdcGate)
+            {
+                if (!NativeMethods.GetCapabilitiesStringLength(handle, out var length) || length == 0)
+                {
+                    LastWin32Error = Marshal.GetLastWin32Error();
+                    return false;
+                }
 
-            var buffer = new byte[length];
-            if (!NativeMethods.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length))
-                return false;
+                var buffer = new byte[length];
+                if (!NativeMethods.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length))
+                {
+                    LastWin32Error = Marshal.GetLastWin32Error();
+                    return false;
+                }
 
-            var terminator = Array.IndexOf(buffer, (byte)0);
-            capabilities = Encoding.ASCII.GetString(buffer, 0, terminator >= 0 ? terminator : buffer.Length);
-            return capabilities.Length > 0;
+                var terminator = Array.IndexOf(buffer, (byte)0);
+                capabilities = Encoding.ASCII.GetString(buffer, 0, terminator >= 0 ? terminator : buffer.Length);
+                return capabilities.Length > 0;
+            }
         }
         catch
         {
@@ -87,7 +118,10 @@ public sealed class RealNativeMonitorApi : INativeMonitorApi
     {
         try
         {
-            NativeMethods.DestroyPhysicalMonitor(handle);
+            lock (DdcGate)
+            {
+                NativeMethods.DestroyPhysicalMonitor(handle);
+            }
         }
         catch
         {

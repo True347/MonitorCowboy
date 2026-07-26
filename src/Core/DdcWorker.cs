@@ -167,7 +167,7 @@ public sealed class DdcWorker
                 break;
             }
 
-            _diag?.Invoke($"{_entry.FriendlyName}: capabilities read failed (attempt {attempt}/{CapsReadAttempts})");
+            _diag?.Invoke($"{_entry.FriendlyName}: capabilities read failed (attempt {attempt}/{CapsReadAttempts}, win32={_api.LastWin32Error})");
             if (attempt < CapsReadAttempts)
                 await Task.Delay(CapsRetryDelay, ct).ConfigureAwait(false);
         }
@@ -178,10 +178,9 @@ public sealed class DdcWorker
         // re-read failure falls back to the known-good map instead.
         if (!_entry.HasKnownCaps)
         {
-            var supportsInput = _api.TryGetVcpFeature(_entry.Handle, Vcp.InputSource, out _, out _);
-            await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
-            var supportsVolume = _api.TryGetVcpFeature(_entry.Handle, Vcp.AudioSpeakerVolume, out _, out _);
-            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume}");
+            var supportsInput = await ProbeAsync(Vcp.InputSource, ct).ConfigureAwait(false);
+            var supportsVolume = await ProbeAsync(Vcp.AudioSpeakerVolume, ct).ConfigureAwait(false);
+            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume} (last win32={_api.LastWin32Error})");
 
             if (supportsInput || supportsVolume)
             {
@@ -191,6 +190,19 @@ public sealed class DdcWorker
         }
 
         _entry.MarkCapsReadFailed();
+    }
+
+    /// <summary>One retry per probed code: a single transient NAK must not decide support.</summary>
+    private async Task<bool> ProbeAsync(byte code, CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            if (_api.TryGetVcpFeature(_entry.Handle, code, out _, out _))
+                return true;
+            await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
+        }
+
+        return false;
     }
 
     private bool ExecuteReadValues()

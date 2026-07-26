@@ -39,4 +39,7 @@ public interface INativeMonitorApi
 
     /// <summary>Releases a handle obtained from <see cref="EnumerateMonitors"/>.</summary>
     void DestroyMonitor(nint handle);
+
+    /// <summary>Win32 error code captured by the most recent failed Try* call; 0 when unavailable.</summary>
+    int LastWin32Error { get; }
 }
