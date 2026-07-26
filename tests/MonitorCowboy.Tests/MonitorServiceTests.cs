@@ -78,6 +78,42 @@ public class MonitorServiceTests
     }
 
     [Fact]
+    public async Task UnsupportedMonitor_SelfHeals_WhenDdcComesBack()
+    {
+        // Simulates re-enabling DDC/CI in the OSD: no Windows event fires, so
+        // the query-driven retry cadence must pick the monitor back up.
+        var api = new FakeNativeMonitorApi
+        {
+            MonitorsToEnumerate =
+            [
+                new PhysicalMonitorInfo(new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#EXT#1", "External Monitor", IsInternal: false),
+            ],
+            Capabilities = null,
+            FailGet = true,
+        };
+
+        var service = new MonitorService(
+            api, new InMemoryCapsStore(), (_, _) => { },
+            unsupportedRetryTtl: TimeSpan.FromMilliseconds(50));
+        service.Initialize();
+
+        await WaitUntilAsync(() => service.GetSnapshots() is [{ CapsState: CapsState.Unsupported }]);
+
+        // DDC/CI comes back.
+        api.Capabilities = Caps;
+        api.FailGet = false;
+        api.SetValue(Vcp.InputSource, 0x0F, 0);
+        api.SetValue(Vcp.AudioSpeakerVolume, 45, 100);
+
+        await Task.Delay(75); // let the retry TTL elapse
+        service.RequestVolatileRefresh();
+
+        await WaitUntilAsync(() => service.GetSnapshots() is [{ CapsState: CapsState.Ready, CurrentVolume: 45u }]);
+
+        service.Dispose();
+    }
+
+    [Fact]
     public async Task Rebuild_WithClearRequest_IsNeverLost_UnderContention()
     {
         var api = new FakeNativeMonitorApi

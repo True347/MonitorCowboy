@@ -9,9 +9,10 @@ namespace MonitorCowboy.Core;
 /// </summary>
 public sealed class MonitorService : IDisposable
 {
-    private static readonly TimeSpan ValuesTtl = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan TeardownBudget = TimeSpan.FromSeconds(2);
 
+    private readonly TimeSpan _valuesTtl;
+    private readonly TimeSpan _unsupportedRetryTtl;
     private readonly INativeMonitorApi _api;
     private readonly ICapsStore _capsStore;
     private readonly Action<string, Exception?> _log;
@@ -29,11 +30,18 @@ public sealed class MonitorService : IDisposable
     /// <summary>Raised (from worker threads) when a user-initiated write ends as failed.</summary>
     public event Action<string, byte, uint>? WriteFailed;
 
-    public MonitorService(INativeMonitorApi api, ICapsStore capsStore, Action<string, Exception?> log)
+    public MonitorService(
+        INativeMonitorApi api,
+        ICapsStore capsStore,
+        Action<string, Exception?> log,
+        TimeSpan? valuesTtl = null,
+        TimeSpan? unsupportedRetryTtl = null)
     {
         _api = api;
         _capsStore = capsStore;
         _log = log;
+        _valuesTtl = valuesTtl ?? TimeSpan.FromSeconds(10);
+        _unsupportedRetryTtl = unsupportedRetryTtl ?? TimeSpan.FromSeconds(60);
     }
 
     /// <summary>Enumerate monitors and start workers. Cheap; capability reads happen in the background.</summary>
@@ -67,9 +75,23 @@ public sealed class MonitorService : IDisposable
         {
             if (devicePath is not null && entry.DevicePath != devicePath)
                 continue;
+
+            // Unsupported monitors self-heal: DDC/CI re-enabled in the OSD
+            // produces no Windows event, so re-probe on a slow query-driven
+            // cadence instead of requiring a restart or manual re-read.
+            if (entry.CapsState == CapsState.Unsupported)
+            {
+                if (now - entry.LastCapsAttemptUtc >= _unsupportedRetryTtl)
+                {
+                    entry.MarkCapsAttemptQueued();
+                    worker.RequestReadCapabilities();
+                }
+                continue;
+            }
+
             if (entry.CapsState != CapsState.Ready)
                 continue;
-            if (now - entry.LastValuesReadUtc < ValuesTtl)
+            if (now - entry.LastValuesReadUtc < _valuesTtl)
                 continue;
             if (!entry.TryBeginRefresh())
                 continue;

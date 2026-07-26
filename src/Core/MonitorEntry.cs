@@ -21,6 +21,7 @@ public sealed class MonitorEntry
     private bool _valuesStale;
     private bool _refreshInFlight;
     private DateTime _lastValuesReadUtc = DateTime.MinValue;
+    private DateTime _lastCapsAttemptUtc = DateTime.MinValue;
     private PendingWrite? _pendingInput;
     private PendingWrite? _pendingVolume;
 
@@ -41,6 +42,14 @@ public sealed class MonitorEntry
 
     public CapsState CapsState { get { lock (_gate) return _capsState; } }
     public bool HasKnownCaps { get { lock (_gate) return _caps is not null; } }
+    public DateTime LastCapsAttemptUtc { get { lock (_gate) return _lastCapsAttemptUtc; } }
+
+    /// <summary>Stamped when a capabilities read is queued, so retry gating cannot re-enqueue every keystroke.</summary>
+    public void MarkCapsAttemptQueued()
+    {
+        lock (_gate)
+            _lastCapsAttemptUtc = DateTime.UtcNow;
+    }
     public bool SupportsInput { get { lock (_gate) return _caps?.Supports(Vcp.InputSource) ?? false; } }
     public bool SupportsVolume { get { lock (_gate) return _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false; } }
     public DateTime LastValuesReadUtc { get { lock (_gate) return _lastValuesReadUtc; } }
@@ -57,6 +66,7 @@ public sealed class MonitorEntry
             _caps = caps;
             _capsProbed = false;
             _capsState = CapsState.Ready;
+            _lastCapsAttemptUtc = DateTime.UtcNow;
         }
         if (notify)
             _onChanged(this);
@@ -79,6 +89,7 @@ public sealed class MonitorEntry
             _caps = new ParsedCapabilities(codes);
             _capsProbed = true;
             _capsState = CapsState.Ready;
+            _lastCapsAttemptUtc = DateTime.UtcNow;
         }
         _onChanged(this);
     }
@@ -102,7 +113,10 @@ public sealed class MonitorEntry
     public void MarkCapsReadFailed()
     {
         lock (_gate)
+        {
             _capsState = _caps is not null ? CapsState.Ready : CapsState.Unsupported;
+            _lastCapsAttemptUtc = DateTime.UtcNow;
+        }
         _onChanged(this);
     }
 
