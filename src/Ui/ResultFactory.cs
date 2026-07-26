@@ -25,12 +25,14 @@ public sealed class ResultFactory
     private readonly IPublicAPI _api;
     private readonly MonitorService _service;
     private readonly string _pluginDirectory;
+    private readonly Action _onWindowDismissed;
 
-    public ResultFactory(IPublicAPI api, MonitorService service, string pluginDirectory)
+    public ResultFactory(IPublicAPI api, MonitorService service, string pluginDirectory, Action onWindowDismissed)
     {
         _api = api;
         _service = service;
         _pluginDirectory = pluginDirectory;
+        _onWindowDismissed = onWindowDismissed;
     }
 
     /// <summary>Query prefix for building navigation targets. Empty for global-keyword configurations.</summary>
@@ -196,10 +198,14 @@ public sealed class ResultFactory
                 view,
                 _ =>
                 {
+                    // Switching input dismisses the launcher: the display is
+                    // likely moving away anyway, and failures still surface
+                    // as a toast. Volume keeps the window (steps are
+                    // press-repeatable); this is input-only by design.
                     if (!_service.RequestWrite(devicePath, Vcp.InputSource, value))
                         NotifyRebuilding();
-                    _api.ChangeQuery(view, true);
-                    return false;
+                    _onWindowDismissed();
+                    return true;
                 }));
             score = Math.Max(1, score - 5);
         }

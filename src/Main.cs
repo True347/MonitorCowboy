@@ -54,7 +54,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             _service.WriteFailed += OnWriteFailed;
             _service.Initialize();
 
-            _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory);
+            _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory, ClearPushRefreshContext);
             _watcher = new TopologyWatcher(OnTopologyChanged);
             _deferredRefresh = new Timer(_ => TryPushRefresh(fromTimer: true), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
@@ -197,6 +197,19 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         VolumeMenuIntent m => m.Monitor.DevicePath,
         _ => null,
     };
+
+    /// <summary>
+    /// Called when an action dismisses the launcher window: the push refresh
+    /// must not rewrite the query text of a window the user just closed.
+    /// </summary>
+    private void ClearPushRefreshContext()
+    {
+        lock (_refreshGate)
+        {
+            _lastRawQuery = "";
+            _lastDevicePath = null;
+        }
+    }
 
     private void RecordQueryContext(string rawQuery, string? devicePath, CancellationToken token)
     {
