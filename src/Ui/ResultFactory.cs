@@ -119,9 +119,12 @@ public sealed class ResultFactory
                 if (m.SupportsInput)
                 {
                     var target = $"{prefix}{m.Index} in ";
+                    var subtitle = m.CapsProbed
+                        ? $"Current: {InputPart(m)} · generic list (monitor did not report its own)"
+                        : $"Current: {InputPart(m)}";
                     results.Add(Item(
                         "Input source",
-                        $"Current: {InputPart(m)}",
+                        subtitle,
                         IconInput, 50, target,
                         _ => { _api.ChangeQuery(target, true); return false; },
                         contextData: m.DevicePath));
@@ -208,6 +211,14 @@ public sealed class ResultFactory
                     return true;
                 }));
             score = Math.Max(1, score - 5);
+        }
+
+        if (m.CapsProbed)
+        {
+            results.Add(Item(
+                "Generic input list",
+                "This monitor answers DDC/CI but did not report its own inputs; entries it lacks simply won't verify.",
+                IconWarning, 2, view, _ => false));
         }
 
         results.Add(BackItem($"{prefix}{m.Index} "));

@@ -50,6 +50,13 @@ public sealed record MonitorSnapshot
 
     public required CapsState CapsState { get; init; }
 
+    /// <summary>
+    /// True when support was established by probing VCP codes directly because
+    /// the capabilities string could not be read; the input list is then the
+    /// generic table, not the monitor's own.
+    /// </summary>
+    public bool CapsProbed { get; init; }
+
     /// <summary>True when the capabilities string lists VCP 0x60.</summary>
     public bool SupportsInput { get; init; }
 

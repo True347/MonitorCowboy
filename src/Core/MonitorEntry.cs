@@ -11,6 +11,7 @@ public sealed class MonitorEntry
     private readonly Action<MonitorEntry> _onChanged;
 
     private CapsState _capsState;
+    private bool _capsProbed;
     private ParsedCapabilities? _caps;
     private uint? _currentInput;
     private uint? _currentVolume;
@@ -37,6 +38,7 @@ public sealed class MonitorEntry
     public string FriendlyName { get; }
 
     public CapsState CapsState { get { lock (_gate) return _capsState; } }
+    public bool HasKnownCaps { get { lock (_gate) return _caps is not null; } }
     public bool SupportsInput { get { lock (_gate) return _caps?.Supports(Vcp.InputSource) ?? false; } }
     public bool SupportsVolume { get { lock (_gate) return _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false; } }
     public DateTime LastValuesReadUtc { get { lock (_gate) return _lastValuesReadUtc; } }
@@ -51,10 +53,32 @@ public sealed class MonitorEntry
         lock (_gate)
         {
             _caps = caps;
+            _capsProbed = false;
             _capsState = CapsState.Ready;
         }
         if (notify)
             _onChanged(this);
+    }
+
+    /// <summary>
+    /// Marks the monitor Ready based on direct VCP probing (capabilities
+    /// unreadable). The input list becomes the generic table.
+    /// </summary>
+    public void ApplyProbedCapabilities(bool supportsInput, bool supportsVolume)
+    {
+        var codes = new Dictionary<byte, IReadOnlyList<uint>>();
+        if (supportsInput)
+            codes[Vcp.InputSource] = InputSourceNames.CommonProbeValues;
+        if (supportsVolume)
+            codes[Vcp.AudioSpeakerVolume] = [];
+
+        lock (_gate)
+        {
+            _caps = new ParsedCapabilities(codes);
+            _capsProbed = true;
+            _capsState = CapsState.Ready;
+        }
+        _onChanged(this);
     }
 
     public void ResetCapsPending()
@@ -198,6 +222,7 @@ public sealed class MonitorEntry
                 DevicePath = DevicePath,
                 FriendlyName = FriendlyName,
                 CapsState = _capsState,
+                CapsProbed = _capsProbed,
                 SupportsInput = _caps?.Supports(Vcp.InputSource) ?? false,
                 SupportsVolume = _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false,
                 InputValues = _caps?.ValuesFor(Vcp.InputSource) ?? [],

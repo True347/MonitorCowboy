@@ -84,6 +84,9 @@ public class DdcWorkerTests
         var entry = NewReadyEntry();
 
         // Block the consumer inside the first set so later writes queue up.
+        // A dedicated 'entered' event signals arrival BEFORE the block — the
+        // SetCalls count only increments after it, so it cannot be the marker.
+        using var entered = new ManualResetEventSlim(false);
         using var gate = new ManualResetEventSlim(false);
         var firstSet = true;
         api.BeforeSet = () =>
@@ -91,13 +94,14 @@ public class DdcWorkerTests
             if (firstSet)
             {
                 firstSet = false;
+                entered.Set();
                 gate.Wait(TimeSpan.FromSeconds(5));
             }
         };
 
         var worker = new DdcWorker(api, entry, null, null);
         worker.RequestWrite(Vcp.AudioSpeakerVolume, 10);
-        await WaitUntilAsync(() => api.SetCalls.Count == 1); // consumer is inside set #1
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)), "consumer never reached the first set");
 
         worker.RequestWrite(Vcp.AudioSpeakerVolume, 20);
         worker.RequestWrite(Vcp.AudioSpeakerVolume, 30);
@@ -165,15 +169,65 @@ public class DdcWorkerTests
     }
 
     [Fact]
-    public async Task ReadCapabilities_FirstSightFailure_MarksUnsupported()
+    public async Task ReadCapabilities_FirstSightFailure_NoVcpAnswer_MarksUnsupported()
     {
-        var api = new FakeNativeMonitorApi { Capabilities = null };
+        var api = new FakeNativeMonitorApi { Capabilities = null, FailGet = true };
         var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
         var worker = new DdcWorker(api, entry, null, null);
 
         worker.RequestReadCapabilities();
 
         await WaitUntilAsync(() => entry.CapsState == CapsState.Unsupported);
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task ReadCapabilities_Failure_ProbesVcpAndBecomesReady()
+    {
+        // Capabilities unreadable, but the monitor answers VCP directly — the
+        // common real-world case the probe fallback exists for.
+        var api = new FakeNativeMonitorApi { Capabilities = null };
+        api.SetValue(Vcp.InputSource, 0x11, 0);
+        api.SetValue(Vcp.AudioSpeakerVolume, 45, 100);
+        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var worker = new DdcWorker(api, entry, null, null);
+
+        worker.RequestReadCapabilities();
+
+        await WaitUntilAsync(() => entry.BuildSnapshot() is
+        {
+            CapsState: CapsState.Ready,
+            CapsProbed: true,
+            SupportsInput: true,
+            SupportsVolume: true,
+            CurrentInput: 0x11u,
+            CurrentVolume: 45u,
+        });
+        Assert.Equal(InputSourceNames.CommonProbeValues, entry.BuildSnapshot().InputValues);
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task ReadCapabilities_Failure_ProbeVolumeOnly_HidesInput()
+    {
+        var api = new FakeNativeMonitorApi { Capabilities = null };
+        api.SetValue(Vcp.AudioSpeakerVolume, 45, 100); // input probe will fail (no value stored)
+        var entry = new MonitorEntry(1, 0x1234, @"\\?\DISPLAY#TEST#1", "Test Monitor", _ => { });
+        var worker = new DdcWorker(api, entry, null, null);
+
+        worker.RequestReadCapabilities();
+
+        await WaitUntilAsync(() => entry.BuildSnapshot() is
+        {
+            CapsState: CapsState.Ready,
+            CapsProbed: true,
+            SupportsInput: false,
+            SupportsVolume: true,
+        });
 
         worker.Complete();
         await worker.Completion;

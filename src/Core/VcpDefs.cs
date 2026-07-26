@@ -59,4 +59,13 @@ public static class InputSourceNames
     /// </summary>
     public static bool SameInput(uint readValue, uint targetValue)
         => (readValue & 0xFF) == (targetValue & 0xFF);
+
+    /// <summary>
+    /// Generic input list offered when a monitor answers VCP but its
+    /// capabilities string cannot be read (a common real-world failure —
+    /// capabilities is the most fragile DDC/CI command). Wrong entries are
+    /// harmless: the write simply comes back unverified.
+    /// </summary>
+    public static readonly IReadOnlyList<uint> CommonProbeValues =
+        [0x0F, 0x10, 0x11, 0x12, 0x1B, 0x03, 0x04, 0x01];
 }

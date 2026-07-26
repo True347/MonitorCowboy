@@ -20,22 +20,31 @@ public sealed class DdcWorker
 
     private static readonly TimeSpan InterOpDelay = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan PostSetDelay = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan CapsRetryDelay = TimeSpan.FromMilliseconds(300);
     private const int VerifyAttempts = 3;
+    private const int CapsReadAttempts = 2;
 
     private readonly INativeMonitorApi _api;
     private readonly MonitorEntry _entry;
     private readonly Action<string, string>? _onCapabilitiesRead;
     private readonly Action<byte, uint>? _onWriteFailed;
+    private readonly Action<string>? _diag;
     private readonly Channel<Signal> _signals = Channel.CreateUnbounded<Signal>();
     private readonly ConcurrentDictionary<byte, uint> _pendingWrites = new();
     private readonly CancellationTokenSource _cts = new();
 
-    public DdcWorker(INativeMonitorApi api, MonitorEntry entry, Action<string, string>? onCapabilitiesRead, Action<byte, uint>? onWriteFailed)
+    public DdcWorker(
+        INativeMonitorApi api,
+        MonitorEntry entry,
+        Action<string, string>? onCapabilitiesRead,
+        Action<byte, uint>? onWriteFailed,
+        Action<string>? diag = null)
     {
         _api = api;
         _entry = entry;
         _onCapabilitiesRead = onCapabilitiesRead;
         _onWriteFailed = onWriteFailed;
+        _diag = diag;
         Completion = Task.Run(ConsumeAsync);
     }
 
@@ -97,7 +106,7 @@ public sealed class DdcWorker
                         switch (signal)
                         {
                             case Signal.ReadCapabilities:
-                                ExecuteReadCapabilities();
+                                await ExecuteReadCapabilitiesAsync(ct).ConfigureAwait(false);
                                 ExecuteReadValues();
                                 didIo = true;
                                 break;
@@ -139,18 +148,49 @@ public sealed class DdcWorker
         }
     }
 
-    private void ExecuteReadCapabilities()
+    private async Task ExecuteReadCapabilitiesAsync(CancellationToken ct)
     {
-        if (_api.TryGetCapabilitiesString(_entry.Handle, out var raw)
-            && CapabilitiesParser.Parse(raw) is { } caps)
+        for (var attempt = 1; attempt <= CapsReadAttempts; attempt++)
         {
-            _entry.ApplyCapabilities(caps);
-            _onCapabilitiesRead?.Invoke(_entry.DevicePath, raw);
+            if (_api.TryGetCapabilitiesString(_entry.Handle, out var raw))
+            {
+                if (CapabilitiesParser.Parse(raw) is { } caps)
+                {
+                    _entry.ApplyCapabilities(caps);
+                    _onCapabilitiesRead?.Invoke(_entry.DevicePath, raw);
+                    _diag?.Invoke($"{_entry.FriendlyName}: capabilities parsed, {caps.VcpCodes.Count} VCP codes");
+                    return;
+                }
+
+                // Readable but unusable — retrying returns the same string.
+                _diag?.Invoke($"{_entry.FriendlyName}: capabilities string has no usable vcp() section (length {raw.Length})");
+                break;
+            }
+
+            _diag?.Invoke($"{_entry.FriendlyName}: capabilities read failed (attempt {attempt}/{CapsReadAttempts})");
+            if (attempt < CapsReadAttempts)
+                await Task.Delay(CapsRetryDelay, ct).ConfigureAwait(false);
         }
-        else
+
+        // The capabilities exchange is the most fragile DDC/CI command; plenty
+        // of monitors fail it while answering VCP get/set just fine. Probe the
+        // two features directly before giving up — but only on first sight; a
+        // re-read failure falls back to the known-good map instead.
+        if (!_entry.HasKnownCaps)
         {
-            _entry.MarkCapsReadFailed();
+            var supportsInput = _api.TryGetVcpFeature(_entry.Handle, Vcp.InputSource, out _, out _);
+            await Task.Delay(InterOpDelay, ct).ConfigureAwait(false);
+            var supportsVolume = _api.TryGetVcpFeature(_entry.Handle, Vcp.AudioSpeakerVolume, out _, out _);
+            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume}");
+
+            if (supportsInput || supportsVolume)
+            {
+                _entry.ApplyProbedCapabilities(supportsInput, supportsVolume);
+                return;
+            }
         }
+
+        _entry.MarkCapsReadFailed();
     }
 
     private bool ExecuteReadValues()

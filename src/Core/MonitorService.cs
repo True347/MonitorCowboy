@@ -236,7 +236,8 @@ public sealed class MonitorService : IDisposable
                 _api,
                 entry,
                 OnCapabilitiesRead,
-                (code, target) => WriteFailed?.Invoke(entry.DevicePath, code, target));
+                (code, target) => WriteFailed?.Invoke(entry.DevicePath, code, target),
+                message => _log(message, null));
             result.Add((entry, worker));
         }
 
