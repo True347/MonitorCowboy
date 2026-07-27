@@ -18,6 +18,8 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
     private readonly object _refreshGate = new();
     private string _lastRawQuery = "";
+    private string _lastSeenQuery = "";
+    private bool _stateDirty;
     private string? _lastDevicePath;
     private CancellationToken _lastQueryToken = CancellationToken.None;
     private DateTime _lastQueryAtUtc = DateTime.MinValue;
@@ -57,6 +59,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory, ClearPushRefreshContext);
             _watcher = new TopologyWatcher(OnTopologyChanged);
             _deferredRefresh = new Timer(_ => TryPushRefresh(fromTimer: true), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            context.API.VisibilityChanged += OnVisibilityChanged;
         }
         catch (Exception ex)
         {
@@ -163,6 +166,15 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
     public void Dispose()
     {
+        try
+        {
+            _context.API.VisibilityChanged -= OnVisibilityChanged;
+        }
+        catch
+        {
+            // Host may already be tearing the API down.
+        }
+
         _watcher?.Dispose();
         _watcher = null;
 
@@ -221,10 +233,49 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             _pushRefreshInduced = false;
 
             _lastRawQuery = rawQuery;
+            _lastSeenQuery = rawQuery;
+            _stateDirty = false; // this render reflects the current cache
             _lastDevicePath = devicePath;
             _lastQueryToken = token;
             if (!selfInduced)
                 _lastQueryAtUtc = DateTime.UtcNow;
+        }
+    }
+
+    /// <summary>
+    /// Flow's preserve-last-query mode restores the text AND the frozen result
+    /// list on window show without re-running the query — so results rendered
+    /// before a background write completed would display pre-write state.
+    /// When the window becomes visible and monitor state changed since our
+    /// last render, re-run whatever query is in the box: ours gets a fresh
+    /// render, anyone else's is a harmless recompute (the text is never
+    /// rewritten, so no hijacking). The event is raised on the UI thread,
+    /// which is what ReQuery requires.
+    /// </summary>
+    private void OnVisibilityChanged(object sender, VisibilityChangedEventArgs args)
+    {
+        if (!args.IsVisible)
+            return;
+
+        bool dirty;
+        string lastSeen;
+        lock (_refreshGate)
+        {
+            dirty = _stateDirty;
+            lastSeen = _lastSeenQuery;
+            _stateDirty = false;
+        }
+
+        if (!dirty || lastSeen.Length == 0)
+            return;
+
+        try
+        {
+            _context.API.ReQuery(false);
+        }
+        catch (Exception ex)
+        {
+            LogError("Requery on window show failed", ex);
         }
     }
 
@@ -238,7 +289,12 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     {
         string? contextPath;
         lock (_refreshGate)
+        {
+            // Whatever the push-refresh outcome, the frozen result list Flow
+            // may restore on the next window show no longer matches the cache.
+            _stateDirty = true;
             contextPath = _lastDevicePath;
+        }
 
         if (contextPath is not null && devicePath.Length > 0 && devicePath != contextPath)
             return;
