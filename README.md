@@ -9,8 +9,8 @@ Control your monitors over DDC/CI straight from [Flow Launcher](https://www.flow
 | `mc` | Every DDC/CI-capable monitor with its current input and volume |
 | `mc 1` | Actions for monitor 1: **Input source**, **Volume** |
 | `mc 1 in` | The inputs this monitor actually supports (✓ marks the active one) — Enter switches |
-| `mc 1 vol` | Current volume plus +5 / −5 step items |
-| `mc 1 vol 30` | Set volume to 30 |
+| `mc 1 vol` | Shows the current volume, with two step items: `Volume +5` raises it and `Volume -5` lowers it (press Enter repeatedly to keep stepping) |
+| `mc 1 vol 30` | Set volume to exactly 30 (any value from 0 to the monitor's maximum) |
 | `mc dell` | Filter monitors by name; a unique match drills straight in |
 
 Navigation is keyboard-first: Enter or Tab drills in, the `← Back` item goes up
