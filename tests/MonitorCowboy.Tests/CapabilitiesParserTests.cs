@@ -42,6 +42,12 @@ public class CapabilitiesParserTests
         // to exactly these three values verifying as applied.
         Assert.Equal(new uint[] { 0x01, 0x03, 0x11 }, caps.ValuesFor(Vcp.InputSource));
         Assert.True(caps.Supports(Vcp.AudioSpeakerVolume));
+
+        // The same monitor, parsed in situ, reported 39 codes from a 430-byte
+        // string. Both numbers pin this fixture to the device it came from: if
+        // either drifts, the fixture was edited rather than captured.
+        Assert.Equal(39, caps.VcpCodes.Count);
+        Assert.Equal(430, Philips221S8LCaps.Length);
     }
 
     [Fact]
