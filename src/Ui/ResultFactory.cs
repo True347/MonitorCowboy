@@ -404,7 +404,7 @@ public sealed class ResultFactory
         _ => "Type a value to set it, or use the step items below.",
     };
 
-    private static Result Item(
+    private Result Item(
         string title,
         string subtitle,
         string icon,
@@ -417,9 +417,39 @@ public sealed class ResultFactory
         SubTitle = subtitle,
         IcoPath = icon,
         Score = score,
-        Action = action,
+        Action = Guarded(action),
         AutoCompleteText = autoComplete,
         ContextData = contextData,
         AddSelectedCount = false,
+    };
+
+    /// <summary>
+    /// The host awaits <c>Result.ExecuteAsync</c> with no exception boundary of
+    /// its own, so anything escaping an action surfaces inside its command
+    /// handling. Every action this factory builds is wrapped here, alongside
+    /// the other per-result contracts: a failed action leaves the window open
+    /// instead of taking the launcher down with it.
+    /// </summary>
+    private Func<ActionContext, bool> Guarded(Func<ActionContext, bool> action) => context =>
+    {
+        try
+        {
+            return action(context);
+        }
+        catch (Exception ex)
+        {
+            // Silence here would present as "Enter does nothing", with nothing
+            // in the log the README sends people to read.
+            try
+            {
+                _api.LogException(nameof(ResultFactory), "Result action failed", ex);
+            }
+            catch
+            {
+                // Logging must never take the action path down either.
+            }
+
+            return false;
+        }
     };
 }

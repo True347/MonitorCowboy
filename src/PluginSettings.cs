@@ -6,5 +6,17 @@ namespace MonitorCowboy;
 /// </summary>
 public class PluginSettings
 {
-    public Dictionary<string, string> CapabilitiesByDevicePath { get; set; } = new();
+    private Dictionary<string, string> _capabilitiesByDevicePath = new();
+
+    /// <summary>
+    /// The setter coalesces null away: Flow only guards against a null root
+    /// object, so a hand-edited or partially written file carrying an explicit
+    /// null here would deserialize into a valid settings object with no map,
+    /// and the first cache read would brick startup for good.
+    /// </summary>
+    public Dictionary<string, string> CapabilitiesByDevicePath
+    {
+        get => _capabilitiesByDevicePath;
+        set => _capabilitiesByDevicePath = value ?? new();
+    }
 }

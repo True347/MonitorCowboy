@@ -133,10 +133,12 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
     public List<Result> LoadContextMenus(Result selectedResult)
     {
-        if (selectedResult.ContextData is not string devicePath || _service is null)
+        // Read once: disposal between the null check and the capture would
+        // leave the lambdas holding a null service until the user presses Enter.
+        var service = _service;
+        if (selectedResult.ContextData is not string devicePath || service is null)
             return [];
 
-        var service = _service;
         return
         [
             new Result
@@ -145,7 +147,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 SubTitle = "Re-read the current input and volume of this monitor.",
                 IcoPath = "Images/monitor.png",
                 AddSelectedCount = false,
-                Action = _ => { service.RequestValueReread(devicePath); return true; },
+                Action = _ => RunMaintenance(() => service.RequestValueReread(devicePath)),
             },
             new Result
             {
@@ -153,15 +155,46 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 SubTitle = "Slow (can take seconds). Use after enabling DDC/CI in the monitor's OSD.",
                 IcoPath = "Images/warning.png",
                 AddSelectedCount = false,
-                Action = _ => { service.RequestCapsReread(devicePath); return true; },
+                Action = _ => RunMaintenance(() => service.RequestCapsReread(devicePath)),
             },
         ];
     }
 
+    /// <summary>
+    /// Context menu actions are invoked by the host without an exception
+    /// boundary of its own, so nothing may escape one — same contract the
+    /// result factory enforces on the results it builds.
+    /// </summary>
+    private bool RunMaintenance(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            LogError("Maintenance action failed", ex);
+        }
+
+        return true;
+    }
+
     public async Task ReloadDataAsync()
     {
-        if (_service is not null)
-            await _service.RebuildTopologyAsync(clearCapsCache: true).ConfigureAwait(false);
+        // Read once, and let nothing escape: this is a host-invoked entry point
+        // and disposal can null the field between a check and a use.
+        var service = _service;
+        if (service is null)
+            return;
+
+        try
+        {
+            await service.RebuildTopologyAsync(clearCapsCache: true).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LogError("Reload plugin data failed", ex);
+        }
     }
 
     public void Dispose()
@@ -175,16 +208,19 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             // Host may already be tearing the API down.
         }
 
-        _watcher?.Dispose();
-        _watcher = null;
-
-        // Unsubscribe before touching the timer: a worker still in
-        // OnServiceStateChanged must not race a disposed timer.
+        // Unsubscribe first, before anything below can block. A worker still in
+        // OnServiceStateChanged must not race a disposed timer — and its push
+        // refresh marshals into the UI thread synchronously, which is the very
+        // thread running this method: with the subscription live, the watcher's
+        // bounded wait below would deadlock against it for its full budget.
         if (_service is not null)
         {
             _service.StateChanged -= OnServiceStateChanged;
             _service.WriteFailed -= OnWriteFailed;
         }
+
+        _watcher?.Dispose();
+        _watcher = null;
 
         _deferredRefresh?.Dispose();
         _deferredRefresh = null;

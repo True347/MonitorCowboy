@@ -65,7 +65,15 @@ public sealed class TopologyWatcher : IDisposable
 
         // Blocking dispose: guarantee no callback runs after this returns, so
         // the owner can tear down what the callback would have touched.
-        using var done = new ManualResetEvent(false);
+        //
+        // The handle is deliberately never disposed. The runtime signals it
+        // when the last timer callback finishes, which can be after this
+        // bounded wait gives up (a callback that reaches ChangeQuery blocks on
+        // the UI thread this very method is running on). Closing it first
+        // would make that signal throw ObjectDisposedException on a thread
+        // pool thread, with nothing to catch it — taking the host down. One
+        // leaked event handle per plugin lifetime is the cheaper trade.
+        var done = new ManualResetEvent(false);
         if (_timer.Dispose(done))
             done.WaitOne(TimeSpan.FromSeconds(1));
     }
