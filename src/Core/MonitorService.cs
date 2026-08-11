@@ -101,25 +101,34 @@ public sealed class MonitorService : IDisposable
                 continue;
             }
 
-            var age = now - entry.LastValuesReadUtc;
+            var lastRead = entry.LastValuesReadUtc;
+            var age = now - lastRead;
+
+            // A monitor that has never been read is a fresh entry, not one that
+            // is 2000 years stale — printing the raw span there is noise.
+            var ageField = lastRead == DateTime.MinValue
+                ? "age=never"
+                : $"age_ms={(long)age.TotalMilliseconds}";
+
             if (age < _valuesTtl)
             {
                 if (_trace.Enabled)
-                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-ttl age_ms={(long)age.TotalMilliseconds}");
+                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-ttl {ageField}");
                 continue;
             }
 
             if (!entry.TryBeginRefresh())
             {
                 // The one shape that can wedge a monitor permanently: if this
-                // keeps repeating, the in-flight flag never got cleared.
+                // keeps repeating with no intervening run, the in-flight flag
+                // never got cleared.
                 if (_trace.Enabled)
-                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-inflight age_ms={(long)age.TotalMilliseconds}");
+                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-inflight {ageField}");
                 continue;
             }
 
             if (_trace.Enabled)
-                _trace.Write(entry.Tag, "REFRESH", $"decision=run age_ms={(long)age.TotalMilliseconds}");
+                _trace.Write(entry.Tag, "REFRESH", $"decision=run {ageField}");
 
             worker.RequestReadValues();
         }

@@ -74,9 +74,13 @@ public sealed class DiagLog : IDiag, IDisposable
         {
             // Stamped here rather than in the consumer: the timestamp must
             // describe when the event happened, not when it reached the disk.
+            // Zero-padded rather than space-padded: the columns still line up,
+            // but "t=" stays a single parseable key=value token. Right-aligning
+            // with spaces put a gap after the '=' and shifted every field after
+            // it for anything splitting on whitespace.
             var line = string.Create(
                 CultureInfo.InvariantCulture,
-                $"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fff}Z t={_clock.ElapsedMilliseconds,8} {tag,-3} {code,-16} {fields}");
+                $"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fff}Z t={_clock.ElapsedMilliseconds:D8} {tag,-3} {code,-16} {fields}");
 
             if (_lines.Writer.TryWrite(line))
                 Interlocked.Increment(ref _written);

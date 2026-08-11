@@ -193,9 +193,9 @@ public sealed class DdcWorker
                 break;
             }
 
-            _diag?.Invoke($"{_entry.FriendlyName}: capabilities read failed (attempt {attempt}/{CapsReadAttempts}, win32={_api.LastWin32Error})");
+            _diag?.Invoke($"{_entry.FriendlyName}: capabilities read failed (attempt {attempt}/{CapsReadAttempts}, win32={Win32()})");
             if (_trace.Enabled)
-                _trace.Write(_entry.Tag, "CAPS.FAIL", $"attempt={attempt}/{CapsReadAttempts} ms={Ms(started)} win32={_api.LastWin32Error}");
+                _trace.Write(_entry.Tag, "CAPS.FAIL", $"attempt={attempt}/{CapsReadAttempts} ms={Ms(started)} win32={Win32()}");
 
             if (attempt < CapsReadAttempts)
                 await Task.Delay(CapsRetryDelay, ct).ConfigureAwait(false);
@@ -209,10 +209,10 @@ public sealed class DdcWorker
         {
             var supportsInput = await ProbeAsync(Vcp.InputSource, ct).ConfigureAwait(false);
             var supportsVolume = await ProbeAsync(Vcp.AudioSpeakerVolume, ct).ConfigureAwait(false);
-            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume} (last win32={_api.LastWin32Error})");
+            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume} (last win32={Win32()})");
 
             if (_trace.Enabled)
-                _trace.Write(_entry.Tag, "CAPS.PROBE", $"input={supportsInput} volume={supportsVolume} win32={_api.LastWin32Error}");
+                _trace.Write(_entry.Tag, "CAPS.PROBE", $"input={supportsInput} volume={supportsVolume} win32={Win32()}");
 
             if (supportsInput || supportsVolume)
             {
@@ -290,8 +290,8 @@ public sealed class DdcWorker
                 _entry.Tag,
                 "VCP.GET",
                 ok
-                    ? $"code=0x{code:X2} ok=1 cur=0x{current:X2} max={max} ms={Ms(started)}"
-                    : $"code=0x{code:X2} ok=0 ms={Ms(started)} win32={_api.LastWin32Error}");
+                    ? $"code=0x{code:X2} ok=1 cur={Val(code, current)} max={max} ms={Ms(started)}"
+                    : $"code=0x{code:X2} ok=0 ms={Ms(started)} win32={Win32()}");
         }
 
         return ok;
@@ -321,8 +321,8 @@ public sealed class DdcWorker
         {
             if (_trace.Enabled)
             {
-                _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target=0x{target:X2} ok=0 ms={Ms(setStarted)} win32={_api.LastWin32Error}");
-                _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target=0x{target:X2} outcome=failed ms={Ms(opStarted)}");
+                _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target={Val(code, target)} ok=0 ms={Ms(setStarted)} win32={Win32()}");
+                _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target={Val(code, target)} outcome=failed ms={Ms(opStarted)}");
             }
 
             // Toast only when the failure was actually recorded — a newer
@@ -333,7 +333,7 @@ public sealed class DdcWorker
         }
 
         if (_trace.Enabled)
-            _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target=0x{target:X2} ok=1 ms={Ms(setStarted)}");
+            _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target={Val(code, target)} ok=1 ms={Ms(setStarted)}");
 
         // The set call returning success means nothing by itself; the only
         // trustworthy signal is reading the value back.
@@ -353,8 +353,8 @@ public sealed class DdcWorker
                     _entry.Tag,
                     "VERIFY",
                     ok
-                        ? $"code=0x{code:X2} target=0x{target:X2} attempt={attempt}/{VerifyAttempts} read=0x{current:X2} match={matches} ms={Ms(readStarted)}"
-                        : $"code=0x{code:X2} target=0x{target:X2} attempt={attempt}/{VerifyAttempts} read=fail ms={Ms(readStarted)} win32={_api.LastWin32Error}");
+                        ? $"code=0x{code:X2} target={Val(code, target)} attempt={attempt}/{VerifyAttempts} read={Val(code, current)} match={matches} ms={Ms(readStarted)}"
+                        : $"code=0x{code:X2} target={Val(code, target)} attempt={attempt}/{VerifyAttempts} read=fail ms={Ms(readStarted)} win32={Win32()}");
             }
 
             if (matches)
@@ -362,7 +362,7 @@ public sealed class DdcWorker
                 _entry.ApplyReadValue(code, current, max);
                 _entry.FinishPendingWrite(code, target, null);
                 if (_trace.Enabled)
-                    _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target=0x{target:X2} outcome=applied attempts={attempt} ms={Ms(opStarted)}");
+                    _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target={Val(code, target)} outcome=applied attempts={attempt} ms={Ms(opStarted)}");
                 return;
             }
 
@@ -374,10 +374,25 @@ public sealed class DdcWorker
         // from this machine; report honestly instead of guessing.
         _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Unverified));
         if (_trace.Enabled)
-            _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target=0x{target:X2} outcome=unverified attempts={VerifyAttempts} ms={Ms(opStarted)}");
+            _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target={Val(code, target)} outcome=unverified attempts={VerifyAttempts} ms={Ms(opStarted)}");
     }
 
     private static long Ms(long startTimestamp) => (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+
+    /// <summary>
+    /// Formats a VCP value the way that code is actually read. Input source is
+    /// an enumerated code and belongs in hex; speaker volume is a continuous
+    /// value over 0..max and belongs in decimal, so that a trace line can be
+    /// compared against what the UI showed without converting anything.
+    /// </summary>
+    private static string Val(byte code, uint value)
+        => code == Vcp.InputSource ? $"0x{value:X2}" : value.ToString();
+
+    /// <summary>
+    /// Win32 errors from the display driver are HRESULT-shaped and surface as
+    /// large negative integers; hex is how they are documented and searched.
+    /// </summary>
+    private string Win32() => $"0x{_api.LastWin32Error:X8}";
 
     /// <summary>
     /// Capabilities strings are vendor ASCII and have been seen carrying stray

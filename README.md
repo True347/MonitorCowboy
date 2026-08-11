@@ -21,8 +21,9 @@ monitor did not make. Token synonyms: `in` = `input`, and `vol` = `volume` = `v`
 
 ## How it works
 
-DDC/CI is slow: a single VCP read blocks for ~40 ms and the capabilities handshake can take
-seconds. So the query path **never talks to a monitor**. Everything you see is rendered from a
+DDC/CI is slow: a single VCP read blocks for around 75 ms on real hardware, a write plus its
+verification for a quarter of a second, and the capabilities handshake can take seconds. So the
+query path **never talks to a monitor**. Everything you see is rendered from a
 warm in-memory cache; reads and writes are queued onto a background worker per monitor, and when
 a result lands the plugin re-runs the current query so the list updates under the cursor.
 
