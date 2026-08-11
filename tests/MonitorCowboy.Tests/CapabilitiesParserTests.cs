@@ -17,6 +17,64 @@ public class CapabilitiesParserTests
         "C6 C8 C9 CA CC(01 02 03 04 05 06 09 0A 0D 10 12 16) D6(01 04) DF 62 8D FF)" +
         "mswhql(1)asset_eep(40)mccs_ver(2.1))";
 
+    /// <summary>
+    /// Verbatim from a Philips 221S8LDAB, captured on real hardware. The two
+    /// previous fixtures were written from documentation; this one is what a
+    /// monitor actually sent, down to the missing spaces and the trailing
+    /// sections after vcp().
+    /// </summary>
+    private const string Philips221S8LCaps =
+        "(prot(monitor)type(LCD)model(221S8LDAB)cmds(01 02 03 07 0C E3 F3)" +
+        "vcp(02 04 05 08 0B 0C 10 12 14(01 04 05 06 07 08 0A 0B) 16 18 1A 52 60(01 03 11) " +
+        "62(00 01) 6C 6E 70 72(05 78 FB 50 64 78 8C A0) 86(02 08) 87 8D(00 01) AC AE B2 B6 " +
+        "C0 C6 C8 CA(01 02) CC(01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 12 14 16 17 1A 1E 24) " +
+        "D6(01 04 05) DC(00 01 02 03 05 08) DF E9(00 02) EB(00 01 02 03) F0(00 01) FD FF)" +
+        "mswhql(1)asset_eep(40)mccs_ver(2.2))";
+
+    [Fact]
+    public void Parse_RealPhilipsString_MatchesTheInputsTheMonitorAccepted()
+    {
+        var caps = CapabilitiesParser.Parse(Philips221S8LCaps);
+
+        Assert.NotNull(caps);
+
+        // VGA-1, DVI-1, HDMI-1 — and a trace from the same monitor shows writes
+        // to exactly these three values verifying as applied.
+        Assert.Equal(new uint[] { 0x01, 0x03, 0x11 }, caps.ValuesFor(Vcp.InputSource));
+        Assert.True(caps.Supports(Vcp.AudioSpeakerVolume));
+    }
+
+    [Fact]
+    public void Parse_ContinuousCodeDeclaredWithValues_StillCountsAsSupported()
+    {
+        // This monitor declares 62(00 01) — a value list on what MCCS treats as
+        // a continuous control. Volume must not be driven from that list: the
+        // same monitor reports a live maximum of 100 and accepted writes across
+        // 5..70. Support detection keys off the code being present, and the
+        // range comes from the live read, so the odd declaration is inert.
+        var caps = CapabilitiesParser.Parse(Philips221S8LCaps);
+
+        Assert.NotNull(caps);
+        Assert.True(caps.Supports(Vcp.AudioSpeakerVolume));
+        Assert.Equal(new uint[] { 0x00, 0x01 }, caps.ValuesFor(Vcp.AudioSpeakerVolume));
+    }
+
+    [Fact]
+    public void Parse_RealPhilipsString_ReadsPastTheLongAndNestedValueLists()
+    {
+        var caps = CapabilitiesParser.Parse(Philips221S8LCaps);
+
+        Assert.NotNull(caps);
+
+        // 0xCC carries 21 values and 0x72 carries eight; codes after both must
+        // still land, and the sections following vcp() must not leak in.
+        Assert.Equal(21, caps.ValuesFor(0xCC).Count);
+        Assert.Equal(new uint[] { 0x05, 0x78, 0xFB, 0x50, 0x64, 0x78, 0x8C, 0xA0 }, caps.ValuesFor(0x72));
+        Assert.True(caps.Supports(0xFF));
+        Assert.True(caps.Supports(0xFD));
+        Assert.False(caps.Supports(0x01));
+    }
+
     [Fact]
     public void Parse_DellStyleString_ExtractsCodesAndValueLists()
     {
