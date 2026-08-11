@@ -16,8 +16,10 @@ namespace MonitorCowboy.Diagnostics;
 /// </summary>
 public sealed class DiagLog : IDiag, IDisposable
 {
+    /// <summary>Size cap per trace. Internal so tests can reach the cap without writing five megabytes.</summary>
+    internal const long DefaultMaxFileBytes = 5L * 1024 * 1024;
+
     private const int QueueCapacity = 4096;
-    private const long MaxFileBytes = 5L * 1024 * 1024;
     private const int KeepFiles = 3;
     private static readonly TimeSpan DrainBudget = TimeSpan.FromMilliseconds(500);
 
@@ -25,22 +27,26 @@ public sealed class DiagLog : IDiag, IDisposable
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly string _directory;
     private readonly string _header;
+    private readonly StreamWriter _file;
     private readonly Task _writer;
+    private readonly long _maxFileBytes;
 
     private long _written;
     private long _dropped;
     private volatile bool _faulted;
 
     /// <summary>
-    /// Throws when the folder cannot be created — deliberately, and before the
-    /// object claims to be running: the caller turns diagnostics on only if
-    /// there is somewhere to write, and the folder exists by the time
-    /// <see cref="FilePath"/> is handed to anything that opens it.
+    /// Throws when the folder cannot be created or the file cannot be opened —
+    /// deliberately, and before the object claims to be running: the caller
+    /// turns diagnostics on only if there is somewhere to write, and by the
+    /// time <see cref="FilePath"/> is handed to anything, that file exists and
+    /// is ours.
     /// </summary>
-    public DiagLog(string directory, string header)
+    public DiagLog(string directory, string header, long maxFileBytes = DefaultMaxFileBytes)
     {
         _directory = directory;
         _header = header;
+        _maxFileBytes = maxFileBytes;
 
         Directory.CreateDirectory(directory);
         Prune();
@@ -53,8 +59,54 @@ public sealed class DiagLog : IDiag, IDisposable
             SingleReader = true,
         });
 
-        FilePath = Path.Combine(directory, $"trace-{DateTime.Now:yyyyMMdd-HHmmss}.log");
-        _writer = Task.Run(ConsumeAsync);
+        (FilePath, _file) = OpenTrace(directory);
+
+        try
+        {
+            _writer = Task.Run(ConsumeAsync);
+        }
+        catch
+        {
+            // Realistically only an already-failing process reaches here, and
+            // the handle would still be reclaimed by SafeFileHandle's critical
+            // finalizer. Close it now anyway: until the writer task exists,
+            // nothing else owns this handle, and "eventually, via GC" is not a
+            // release policy worth inheriting.
+            _file.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Claims a trace file, unique by construction rather than by hoping the
+    /// clock has moved. Retiring one log and opening the next can complete in
+    /// well under a millisecond, so a timestamped name alone collides: two
+    /// sessions would be appended into one file, and on Windows the second
+    /// open would fail outright and retire the new trace on arrival.
+    /// </summary>
+    private static (string Path, StreamWriter File) OpenTrace(string directory)
+    {
+        var stamp = $"{DateTime.Now:yyyyMMdd-HHmmss-fff}";
+
+        for (var n = 0; ; n++)
+        {
+            var path = Path.Combine(directory, n == 0 ? $"trace-{stamp}.log" : $"trace-{stamp}-{n}.log");
+            try
+            {
+                // ReadWrite, so a support file can be opened by a text editor
+                // while it is still being written — on Windows a reader must be
+                // permitted to coexist with our write access, and FileShare.Read
+                // alone denies that. Deliberately not Delete: refusing deletion
+                // of the live trace is what keeps Prune from unlinking it.
+                var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
+                return (path, new StreamWriter(stream) { AutoFlush = false });
+            }
+            catch (IOException) when (n < 99 && File.Exists(path))
+            {
+                // Taken within the same millisecond; step the suffix. Any other
+                // I/O failure is a real one and propagates to the caller.
+            }
+        }
     }
 
     public string FilePath { get; }
@@ -112,10 +164,11 @@ public sealed class DiagLog : IDiag, IDisposable
 
     private async Task ConsumeAsync()
     {
-        StreamWriter? file = null;
+        // The file was opened by the constructor, so a trace that exists is
+        // already writable: reaching here cannot fail for want of a file.
+        var file = _file;
         try
         {
-            file = new StreamWriter(FilePath, append: true) { AutoFlush = false };
             await file.WriteLineAsync(_header).ConfigureAwait(false);
             await file.FlushAsync().ConfigureAwait(false);
 
@@ -128,7 +181,7 @@ public sealed class DiagLog : IDiag, IDisposable
 
                 await file.FlushAsync().ConfigureAwait(false);
 
-                if (file.BaseStream.Length < MaxFileBytes)
+                if (file.BaseStream.Length < _maxFileBytes)
                     continue;
 
                 await file.WriteLineAsync("-- size cap reached; trace stops here --").ConfigureAwait(false);
@@ -147,7 +200,7 @@ public sealed class DiagLog : IDiag, IDisposable
 
             try
             {
-                file?.Dispose();
+                file.Dispose();
             }
             catch
             {

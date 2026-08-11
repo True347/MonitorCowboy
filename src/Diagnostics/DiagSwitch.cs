@@ -13,6 +13,7 @@ public sealed class DiagSwitch : IDiag, IDiagnosticsControl, IDisposable
     private readonly object _gate = new();
     private readonly Func<string> _header;
     private readonly Action<bool> _persist;
+    private readonly long _maxFileBytes;
 
     private volatile DiagLog? _log;
     private bool _disposed;
@@ -20,11 +21,17 @@ public sealed class DiagSwitch : IDiag, IDiagnosticsControl, IDisposable
     /// <param name="directoryPath">Folder the traces live in.</param>
     /// <param name="header">Builds the session header, evaluated when a trace opens.</param>
     /// <param name="persist">Records the new state so it survives a host restart.</param>
-    public DiagSwitch(string directoryPath, Func<string> header, Action<bool> persist)
+    /// <param name="maxFileBytes">Size cap per trace; lowered by tests to reach the cap quickly.</param>
+    public DiagSwitch(
+        string directoryPath,
+        Func<string> header,
+        Action<bool> persist,
+        long maxFileBytes = DiagLog.DefaultMaxFileBytes)
     {
         DirectoryPath = directoryPath;
         _header = header;
         _persist = persist;
+        _maxFileBytes = maxFileBytes;
     }
 
     public string DirectoryPath { get; }
@@ -50,18 +57,26 @@ public sealed class DiagSwitch : IDiag, IDiagnosticsControl, IDisposable
 
             if (enabled)
             {
-                if (_log is not null)
+                // Only a *running* trace means there is nothing to do. A log
+                // that retired itself — size cap reached, or an I/O fault —
+                // still occupies the field while reporting itself off, and
+                // treating that as "already on" would strand the support
+                // surface in exactly the state it exists to diagnose: no
+                // reachable action turns it back on, only a host restart.
+                if (_log is { Enabled: true })
                     return;
+
+                closing = _log;
+                _log = null;
 
                 try
                 {
-                    _log = new DiagLog(DirectoryPath, _header());
+                    _log = new DiagLog(DirectoryPath, _header(), _maxFileBytes);
                 }
                 catch
                 {
                     // Could not open a trace; stay off rather than half-on.
                     _log = null;
-                    return;
                 }
             }
             else
@@ -70,13 +85,19 @@ public sealed class DiagSwitch : IDiag, IDiagnosticsControl, IDisposable
                 _log = null;
             }
 
-            try
+            // Persist only what was actually achieved: a failed enable must not
+            // be recorded as on, or the next host start would try to resume a
+            // trace that could not be opened.
+            if ((_log is not null) == enabled)
             {
-                _persist(enabled);
-            }
-            catch
-            {
-                // The state is live either way; persistence is a convenience.
+                try
+                {
+                    _persist(enabled);
+                }
+                catch
+                {
+                    // The state is live either way; persistence is a convenience.
+                }
             }
         }
 

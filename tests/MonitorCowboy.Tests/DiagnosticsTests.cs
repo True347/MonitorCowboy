@@ -28,9 +28,20 @@ public class DiagnosticsTests : IDisposable
     }
 
     private string ReadTrace()
+        => ReadShared(new DirectoryInfo(_dir).GetFiles("trace-*.log").Single().FullName);
+
+    /// <summary>
+    /// Reads a trace that may still be open for writing. File.ReadAllText asks
+    /// for FileShare.Read, which on Windows will not coexist with the writer's
+    /// write access — and the drain that closes it is bounded, so a loaded
+    /// machine can leave it open. Invisible on Linux, where share modes are not
+    /// enforced, which is exactly why it belongs here rather than in CI.
+    /// </summary>
+    private static string ReadShared(string path)
     {
-        var file = new DirectoryInfo(_dir).GetFiles("trace-*.log").Single();
-        return File.ReadAllText(file.FullName);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 
     [Fact]
@@ -143,7 +154,7 @@ public class DiagnosticsTests : IDisposable
         Assert.Null(sw.FilePath);
 
         Assert.Equal([true, false], persisted);
-        Assert.Contains("CAPS.RAW", File.ReadAllText(path!));
+        Assert.Contains("CAPS.RAW", ReadShared(path!));
     }
 
     [Fact]
@@ -173,6 +184,44 @@ public class DiagnosticsTests : IDisposable
 
         // The live state is what the session needs; persistence is a convenience.
         Assert.True(sw.Enabled);
+    }
+
+    [Fact]
+    public void DiagLog_PastItsSizeCap_RetiresItself()
+    {
+        using var log = new DiagLog(_dir, "h", maxFileBytes: 512);
+
+        for (var i = 0; i < 200; i++)
+            log.Write("M1", "VCP.GET", "code=0x60 ok=1 cur=0x11 max=17 ms=77");
+
+        SpinWait.SpinUntil(() => !log.Enabled, TimeSpan.FromSeconds(5));
+        Assert.False(log.Enabled);
+    }
+
+    [Fact]
+    public void DiagSwitch_AfterTheTraceRetiresItself_TurnsOnAgain()
+    {
+        var persisted = new List<bool>();
+        using var sw = new DiagSwitch(_dir, () => "h", persisted.Add, maxFileBytes: 512);
+
+        sw.SetEnabled(true);
+        var retired = sw.FilePath;
+
+        // Reaching the size cap is the ordinary end of a long support session,
+        // not an error. The retired log keeps occupying the field while
+        // reporting itself off, and once upon a time that made every route back
+        // on a no-op — leaving a restart as the only escape.
+        for (var i = 0; i < 200; i++)
+            sw.Write("M1", "VCP.GET", "code=0x60 ok=1 cur=0x11 max=17 ms=77");
+
+        SpinWait.SpinUntil(() => !sw.Enabled, TimeSpan.FromSeconds(5));
+        Assert.False(sw.Enabled);
+
+        sw.SetEnabled(true);
+
+        Assert.True(sw.Enabled);
+        Assert.NotEqual(retired, sw.FilePath);
+        Assert.Equal([true, true], persisted);
     }
 
     [Fact]
