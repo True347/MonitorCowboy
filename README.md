@@ -5,12 +5,12 @@ and set its speaker volume over DDC/CI** — a rofi-style multi-layer menu under
 so you never reach for the OSD buttons again.
 
 ```
-mc            →  every DDC/CI-capable monitor, with its current input and volume
+mc            →  every external monitor, with its current input and volume
 mc dell       →  filter monitors by name; a unique match drills straight in
 mc 1          →  actions for monitor 1:  Input source / Volume
 mc 1 in       →  the inputs this monitor reports (✓ marks the active one) — Enter switches
 mc 1 in hdmi  →  same, filtered to inputs whose name contains "hdmi"
-mc 1 vol      →  the current volume, plus two step items: Volume +5 / Volume -5
+mc 1 vol      →  the current volume, with two step items: Volume +5 / Volume -5
 mc 1 vol 30   →  set the volume to exactly 30 (0 … the monitor's own maximum)
 ```
 
@@ -68,18 +68,19 @@ runtime, no helper executable. Restart Flow (or reload plugins) and type `mc`.
 
 | You type | What happens |
 |---|---|
-| `mc` | Every external monitor that answers DDC/CI, numbered. The subtitle carries the cached input and volume — plus `stale` when the last read failed, and `updating…` while a refresh is in flight. Features the monitor lacks are simply omitted. |
+| `mc` | Every external monitor, numbered. The subtitle carries the cached input and volume — plus `stale` when the last read failed, and `updating…` while a refresh is in flight. Features the monitor lacks are simply omitted, and one that never answered DDC/CI says so instead. |
 | `mc dell` | Filters the list by name substring. A unique match drills straight into that monitor; an ambiguous one just narrows the list. |
 | `mc 1` | That monitor's actions: **Input source** and **Volume**, each with its current value. Only features its capabilities actually report are offered. |
 | `mc 1 in` | The inputs this monitor accepts, read from its own capabilities string and named from the MCCS table; the subtitle shows the raw VCP value that will be written. `✓` marks the active input. Enter switches and closes the window — the display is probably going away anyway, and failures still surface as a toast. |
 | `mc 1 in hdmi` | Same list, filtered to inputs whose name contains "hdmi". |
-| `mc 1 vol` | The current volume as `Volume: 45 / 100`, plus `Volume +5` and `Volume -5`. Both keep the window open, so Enter can be pressed repeatedly; steps compound from the newest requested value instead of the last value read back. |
+| `mc 1 vol` | The current volume as `Volume: 45 / 100`, plus `Volume +5` and `Volume -5` once the first read has landed. Both keep the window open, so Enter can be pressed repeatedly; steps compound from the newest requested value instead of the last value read back. |
 | `mc 1 vol 30` | Adds a `Set volume to 30` item. A value above the monitor's own maximum is refused with the range it does accept, and a non-numeric token says so rather than reaching the hardware. |
 
 Navigation is keyboard-first: Enter or Tab drills into the next layer, and every layer carries a
 `← Back` item. **Shift+Enter** on a monitor opens maintenance actions — *Refresh values* and
 *Re-read capabilities* (slow; use it after enabling DDC/CI in the OSD). The numbers are list
-positions and stay stable for the session; selection history never reorders them.
+positions: they hold until the set of attached monitors changes, and selection
+history never reorders them.
 
 ---
 
@@ -124,7 +125,7 @@ Three cache layers back the UI, and only the middle one touches disk:
 | Layer | Holds | Lifetime |
 |---|---|---|
 | Topology | the monitor list, device paths, friendly names | rebuilt on every display topology change (debounced ~1 s) |
-| Capabilities | the parsed `vcp(...)` table: which features exist, which input values are accepted | **persisted**; re-read on demand — or automatically once a minute while a monitor reports DDC/CI as unsupported, since re-enabling it in the OSD raises no Windows event |
+| Capabilities | the parsed `vcp(...)` table: which features exist, which input values are accepted | **persisted**; re-read on demand — or, while a monitor reports DDC/CI as unsupported, retried whenever you query it, at most once a minute, since re-enabling it in the OSD raises no Windows event |
 | Values | current input, current volume, volume maximum | in memory, ~10 s TTL; updated in place by a verified write |
 
 Deleting that file costs nothing but one slow re-read. Flow's **Reload Plugin Data** clears it
@@ -138,8 +139,9 @@ and re-enumerates everything from scratch.
   is not answering. Check DDC/CI in the OSD, wake the monitor, and try a direct cable: docks and
   KVMs are the usual culprits.
 - **"This monitor does not support DDC/CI control"** — capabilities could not be read *and*
-  neither feature answered a direct probe. Enable DDC/CI in the OSD; the monitor is re-probed
-  automatically about once a minute, or immediately via Shift+Enter → *Re-read capabilities*.
+  neither feature answered a direct probe. Enable DDC/CI in the OSD, then run `mc` again — the
+  monitor is re-probed on a query, at most once a minute, or immediately via Shift+Enter →
+  *Re-read capabilities*.
 - **"Generic input list"** — the monitor answers VCP but would not report its own inputs, so the
   list is the standard MCCS table. Entries it lacks are harmless; the write simply comes back
   unverified.
