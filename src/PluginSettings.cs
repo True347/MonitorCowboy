@@ -9,6 +9,13 @@ public class PluginSettings
     private Dictionary<string, string> _capabilitiesByDevicePath = new();
 
     /// <summary>
+    /// Whether the structured diagnostic trace is running. Off by default and
+    /// persisted here so that a support session survives a host restart, which
+    /// several failure modes can only be reproduced across.
+    /// </summary>
+    public bool DiagnosticsEnabled { get; set; }
+
+    /// <summary>
     /// The setter coalesces null away: Flow only guards against a null root
     /// object, so a hand-edited or partially written file carrying an explicit
     /// null here would deserialize into a valid settings object with no map,

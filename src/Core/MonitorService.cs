@@ -16,6 +16,7 @@ public sealed class MonitorService : IDisposable
     private readonly INativeMonitorApi _api;
     private readonly ICapsStore _capsStore;
     private readonly Action<string, Exception?> _log;
+    private readonly IDiag _trace;
     private readonly SemaphoreSlim _rebuildGate = new(1, 1);
     private readonly object _gate = new();
 
@@ -35,11 +36,13 @@ public sealed class MonitorService : IDisposable
         ICapsStore capsStore,
         Action<string, Exception?> log,
         TimeSpan? valuesTtl = null,
-        TimeSpan? unsupportedRetryTtl = null)
+        TimeSpan? unsupportedRetryTtl = null,
+        IDiag? trace = null)
     {
         _api = api;
         _capsStore = capsStore;
         _log = log;
+        _trace = trace ?? NullDiag.Instance;
         _valuesTtl = valuesTtl ?? TimeSpan.FromSeconds(10);
         _unsupportedRetryTtl = unsupportedRetryTtl ?? TimeSpan.FromSeconds(60);
     }
@@ -85,16 +88,38 @@ public sealed class MonitorService : IDisposable
                 {
                     entry.MarkCapsAttemptQueued();
                     worker.RequestReadCapabilities();
+                    if (_trace.Enabled)
+                        _trace.Write(entry.Tag, "REFRESH", "decision=unsupported-retry");
                 }
                 continue;
             }
 
             if (entry.CapsState != CapsState.Ready)
+            {
+                if (_trace.Enabled)
+                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-caps state={entry.CapsState}");
                 continue;
-            if (now - entry.LastValuesReadUtc < _valuesTtl)
+            }
+
+            var age = now - entry.LastValuesReadUtc;
+            if (age < _valuesTtl)
+            {
+                if (_trace.Enabled)
+                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-ttl age_ms={(long)age.TotalMilliseconds}");
                 continue;
+            }
+
             if (!entry.TryBeginRefresh())
+            {
+                // The one shape that can wedge a monitor permanently: if this
+                // keeps repeating, the in-flight flag never got cleared.
+                if (_trace.Enabled)
+                    _trace.Write(entry.Tag, "REFRESH", $"decision=skip-inflight age_ms={(long)age.TotalMilliseconds}");
                 continue;
+            }
+
+            if (_trace.Enabled)
+                _trace.Write(entry.Tag, "REFRESH", $"decision=run age_ms={(long)age.TotalMilliseconds}");
 
             worker.RequestReadValues();
         }
@@ -179,12 +204,17 @@ public sealed class MonitorService : IDisposable
 
     private async Task<bool> RebuildOnceAsync(bool clearCapsCache)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+
         List<(MonitorEntry Entry, DdcWorker Worker)> old;
         lock (_gate)
         {
             old = _monitors;
             _monitors = [];
         }
+
+        if (_trace.Enabled)
+            _trace.Write("--", "TOPOLOGY.REBUILD", $"phase=begin before={old.Count} clearCaps={clearCapsCache}");
 
         await TearDownAsync(old).ConfigureAwait(false);
 
@@ -203,12 +233,22 @@ public sealed class MonitorService : IDisposable
 
         if (!published)
         {
+            if (_trace.Enabled)
+                _trace.Write("--", "TOPOLOGY.REBUILD", "phase=abandoned reason=disposed");
+
             await TearDownAsync(fresh).ConfigureAwait(false);
             return false;
         }
 
         WarmUp(fresh);
         StateChanged?.Invoke(string.Empty);
+
+        if (_trace.Enabled)
+        {
+            var ms = (long)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            _trace.Write("--", "TOPOLOGY.REBUILD", $"phase=done after={fresh.Count} ms={ms}");
+        }
+
         return true;
     }
 
@@ -237,28 +277,51 @@ public sealed class MonitorService : IDisposable
     {
         var result = new List<(MonitorEntry, DdcWorker)>();
         var index = 0;
+        var skipped = 0;
 
         foreach (var monitor in _api.EnumerateMonitors())
         {
             // Internal panels do not speak DDC/CI.
             if (monitor.IsInternal)
+            {
+                skipped++;
+                if (_trace.Enabled)
+                    _trace.Write("--", "ENUM.SKIP", $"reason=internal name=\"{monitor.FriendlyName}\" gdi={monitor.Ref.GdiDeviceName}");
                 continue;
+            }
 
             index++;
             var entry = new MonitorEntry(index, monitor.Ref, monitor.DevicePath, monitor.FriendlyName, OnEntryChanged);
 
             var cachedRaw = _capsStore.TryGet(monitor.DevicePath);
+            var seeded = false;
             if (cachedRaw is not null && CapabilitiesParser.Parse(cachedRaw) is { } caps)
+            {
                 entry.ApplyCapabilities(caps, notify: false);
+                seeded = true;
+            }
+
+            if (_trace.Enabled)
+            {
+                _trace.Write(
+                    entry.Tag,
+                    "ENUM.MONITOR",
+                    $"name=\"{monitor.FriendlyName}\" gdi={monitor.Ref.GdiDeviceName} idx={monitor.Ref.Index} " +
+                    $"cacheSeeded={seeded} cached={cachedRaw is not null} path={monitor.DevicePath}");
+            }
 
             var worker = new DdcWorker(
                 _api,
                 entry,
                 OnCapabilitiesRead,
                 (code, target) => WriteFailed?.Invoke(entry.DevicePath, code, target),
-                message => _log(message, null));
+                message => _log(message, null),
+                _trace);
             result.Add((entry, worker));
         }
+
+        if (_trace.Enabled)
+            _trace.Write("--", "ENUM.DONE", $"listed={result.Count} skippedInternal={skipped}");
 
         return result;
     }

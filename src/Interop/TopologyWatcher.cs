@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using Microsoft.Win32;
+using MonitorCowboy.Core;
 
 namespace MonitorCowboy.Interop;
 
@@ -19,12 +21,14 @@ public sealed class TopologyWatcher : IDisposable
     private static readonly TimeSpan Debounce = TimeSpan.FromSeconds(1);
 
     private readonly Action _onTopologyChanged;
+    private readonly IDiag _trace;
     private readonly Timer _timer;
     private volatile bool _disposed;
 
-    public TopologyWatcher(Action onTopologyChanged)
+    public TopologyWatcher(Action onTopologyChanged, IDiag? trace = null)
     {
         _onTopologyChanged = onTopologyChanged;
+        _trace = trace ?? NullDiag.Instance;
         _timer = new Timer(_ => Fire(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
@@ -33,6 +37,9 @@ public sealed class TopologyWatcher : IDisposable
     {
         try
         {
+            if (_trace.Enabled)
+                _trace.Write("--", "TOPOLOGY.EVENT", $"source=DisplaySettingsChanged debounce_ms={(long)Debounce.TotalMilliseconds}");
+
             _timer.Change(Debounce, Timeout.InfiniteTimeSpan);
         }
         catch (ObjectDisposedException)
@@ -73,8 +80,19 @@ public sealed class TopologyWatcher : IDisposable
         // would make that signal throw ObjectDisposedException on a thread
         // pool thread, with nothing to catch it — taking the host down. One
         // leaked event handle per plugin lifetime is the cheaper trade.
+        var started = Stopwatch.GetTimestamp();
         var done = new ManualResetEvent(false);
-        if (_timer.Dispose(done))
-            done.WaitOne(TimeSpan.FromSeconds(1));
+        var removed = _timer.Dispose(done);
+        var signaled = !removed || done.WaitOne(TimeSpan.FromSeconds(1));
+
+        if (_trace.Enabled)
+        {
+            // wait=timeout here means a callback outlived the budget — the
+            // exact condition the undisposed handle above exists to survive.
+            _trace.Write(
+                "--",
+                "DISPOSE.WATCHER",
+                $"removed={removed} wait={(signaled ? "signaled" : "timeout")} ms={(long)Stopwatch.GetElapsedTime(started).TotalMilliseconds}");
+        }
     }
 }

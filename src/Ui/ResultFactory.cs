@@ -26,13 +26,25 @@ public sealed class ResultFactory
     private readonly MonitorService _service;
     private readonly string _pluginDirectory;
     private readonly Action _onWindowDismissed;
+    private readonly IDiagnosticsControl _diagnostics;
+    private readonly IDiag _trace;
 
-    public ResultFactory(IPublicAPI api, MonitorService service, string pluginDirectory, Action onWindowDismissed)
+    /// <param name="diagnostics">Read/control side, rendered by the debug view.</param>
+    /// <param name="trace">Write side, used to record actions that fault.</param>
+    public ResultFactory(
+        IPublicAPI api,
+        MonitorService service,
+        string pluginDirectory,
+        Action onWindowDismissed,
+        IDiagnosticsControl diagnostics,
+        IDiag trace)
     {
         _api = api;
         _service = service;
         _pluginDirectory = pluginDirectory;
         _onWindowDismissed = onWindowDismissed;
+        _diagnostics = diagnostics;
+        _trace = trace;
     }
 
     /// <summary>Query prefix for building navigation targets. Empty for global-keyword configurations.</summary>
@@ -49,6 +61,7 @@ public sealed class ResultFactory
             MonitorMenuIntent menu => BuildMonitorMenu(menu.Monitor, prefix),
             InputMenuIntent input => BuildInputMenu(input.Monitor, input.Filter, prefix),
             VolumeMenuIntent volume => BuildVolumeMenu(volume.Monitor, volume.ValueToken, prefix),
+            DebugMenuIntent debug => BuildDebugMenu(debug.Argument, prefix),
             _ => BuildMonitorList(monitors, "", prefix),
         };
     }
@@ -298,6 +311,74 @@ public sealed class ResultFactory
         return results;
     }
 
+    /// <summary>
+    /// The support surface: it records every DDC/CI exchange to a file so a
+    /// problem on someone else's hardware can be diagnosed from the trace
+    /// instead of from a description. Reachable only by typing <c>debug</c>.
+    /// </summary>
+    private List<Result> BuildDebugMenu(string argument, string prefix)
+    {
+        var view = $"{prefix}debug ";
+        var on = _diagnostics.Enabled;
+
+        var wantOn = argument switch
+        {
+            _ when argument.Equals("on", StringComparison.OrdinalIgnoreCase) => true,
+            _ when argument.Equals("off", StringComparison.OrdinalIgnoreCase) => false,
+            _ => !on,
+        };
+
+        var results = new List<Result>
+        {
+            Item(
+                on ? "Diagnostics are on" : "Diagnostics are off",
+                on
+                    ? $"{_diagnostics.Written} events → {_diagnostics.FilePath}"
+                        + (_diagnostics.Dropped > 0 ? $"  ({_diagnostics.Dropped} dropped)" : "")
+                    : "Records every DDC/CI exchange to a file. Off by default; costs nothing while off.",
+                on ? IconWarning : IconMonitor,
+                100, view, _ => false),
+        };
+
+        if (wantOn != on)
+        {
+            results.Add(Item(
+                wantOn ? "Turn diagnostics on" : "Turn diagnostics off",
+                wantOn
+                    ? "Starts a new trace file and keeps it running across restarts until turned off."
+                    : "Closes the current trace file. The file stays on disk.",
+                IconMonitor, 90, view,
+                _ =>
+                {
+                    _diagnostics.SetEnabled(wantOn);
+                    _api.ChangeQuery(view, true);
+                    return false;
+                }));
+        }
+        else
+        {
+            results.Add(Item(
+                wantOn ? "Already on" : "Already off",
+                $"Type '{prefix}debug {(wantOn ? "off" : "on")}' to change it.",
+                IconMonitor, 90, view, _ => false));
+        }
+
+        var directory = _diagnostics.DirectoryPath;
+        results.Add(Item(
+            "Open the diagnostics folder",
+            directory,
+            IconMonitor, 80, view,
+            _ =>
+            {
+                _api.OpenDirectory(directory);
+                _onWindowDismissed();
+                return true;
+            }));
+
+        results.Add(BackItem(prefix));
+        return results;
+    }
+
     private Result StepItem(string title, uint target, string devicePath, string view, int score) => Item(
         title,
         $"→ {target}",
@@ -443,6 +524,11 @@ public sealed class ResultFactory
             try
             {
                 _api.LogException(nameof(ResultFactory), "Result action failed", ex);
+
+                // Should never appear in a trace; if it does, it is the direct
+                // evidence that this boundary was needed.
+                if (_trace.Enabled)
+                    _trace.Write("--", "ACTION.GUARD", $"ex={ex.GetType().Name} msg=\"{ex.Message}\"");
             }
             catch
             {

@@ -28,6 +28,7 @@ public sealed class MonitorEntry
     public MonitorEntry(int index, MonitorRef monitorRef, string devicePath, string friendlyName, Action<MonitorEntry> onChanged)
     {
         Index = index;
+        Tag = $"M{index}";
         Ref = monitorRef;
         DevicePath = devicePath;
         FriendlyName = friendlyName;
@@ -36,6 +37,9 @@ public sealed class MonitorEntry
     }
 
     public int Index { get; }
+
+    /// <summary>Short stable label for trace lines, e.g. "M1".</summary>
+    public string Tag { get; }
     public MonitorRef Ref { get; }
     public string DevicePath { get; }
     public string FriendlyName { get; }

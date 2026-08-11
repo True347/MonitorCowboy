@@ -1,5 +1,8 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Flow.Launcher.Plugin;
 using MonitorCowboy.Core;
+using MonitorCowboy.Diagnostics;
 using MonitorCowboy.Interop;
 using MonitorCowboy.Ui;
 
@@ -7,6 +10,8 @@ namespace MonitorCowboy;
 
 public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 {
+    private const string LogCategory = "MonitorCowboy";
+
     private static readonly TimeSpan PushRefreshWindow = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PushRefreshThrottle = TimeSpan.FromMilliseconds(300);
 
@@ -14,6 +19,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     private MonitorService? _service;
     private TopologyWatcher? _watcher;
     private ResultFactory? _factory;
+    private DiagSwitch? _diag;
     private Timer? _deferredRefresh;
 
     private readonly object _refreshGate = new();
@@ -34,9 +40,12 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         if (!OperatingSystem.IsWindows())
             return Task.CompletedTask;
 
+        var initStarted = Stopwatch.GetTimestamp();
+
         try
         {
             PluginSettings settings;
+            var settingsSource = "ok";
             try
             {
                 settings = context.API.LoadSettingJsonStorage<PluginSettings>();
@@ -47,19 +56,49 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 // cache is best-effort by design.
                 LogError("Settings load failed; starting with an empty caps cache", ex);
                 settings = new PluginSettings();
+                settingsSource = "recovered";
             }
 
-            var store = new FlowCapsStore(settings, () => context.API.SaveSettingJsonStorage<PluginSettings>());
+            var save = () => context.API.SaveSettingJsonStorage<PluginSettings>();
+            var store = new FlowCapsStore(settings, save);
 
-            _service = new MonitorService(new RealNativeMonitorApi(), store, LogError);
+            _diag = new DiagSwitch(
+                Path.Combine(context.CurrentPluginMetadata.PluginSettingsDirectoryPath, "diagnostics"),
+                BuildTraceHeader,
+                enabled =>
+                {
+                    settings.DiagnosticsEnabled = enabled;
+                    save();
+                });
+
+            // Turned on before anything else is built: a trace that starts
+            // after initialization cannot describe initialization.
+            if (settings.DiagnosticsEnabled)
+                _diag.SetEnabled(true);
+
+            if (_diag.Enabled)
+            {
+                _diag.Write("--", "INIT.START", $"settings={settingsSource} cachedCaps={settings.CapabilitiesByDevicePath.Count}");
+            }
+
+            _service = new MonitorService(new RealNativeMonitorApi(), store, LogError, trace: _diag);
             _service.StateChanged += OnServiceStateChanged;
             _service.WriteFailed += OnWriteFailed;
             _service.Initialize();
 
-            _factory = new ResultFactory(context.API, _service, context.CurrentPluginMetadata.PluginDirectory, ClearPushRefreshContext);
-            _watcher = new TopologyWatcher(OnTopologyChanged);
-            _deferredRefresh = new Timer(_ => TryPushRefresh(fromTimer: true), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _factory = new ResultFactory(
+                context.API,
+                _service,
+                context.CurrentPluginMetadata.PluginDirectory,
+                ClearPushRefreshContext,
+                _diag,
+                _diag);
+            _watcher = new TopologyWatcher(OnTopologyChanged, _diag);
+            _deferredRefresh = new Timer(_ => SafeDeferredRefresh(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             context.API.VisibilityChanged += OnVisibilityChanged;
+
+            if (_diag.Enabled)
+                _diag.Write("--", "INIT.DONE", $"ms={ElapsedMs(initStarted)}");
         }
         catch (Exception ex)
         {
@@ -105,6 +144,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 });
             }
 
+            var started = Stopwatch.GetTimestamp();
             var snapshots = service.GetSnapshots();
             var intent = QueryRouter.Parse(query.Search, snapshots);
             var devicePath = DevicePathOf(intent);
@@ -115,7 +155,21 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             RecordQueryContext(query.OriginalQuery, devicePath, token);
             service.RequestVolatileRefresh(devicePath);
 
-            return Task.FromResult(factory.Build(intent, snapshots, query.ActionKeyword));
+            var results = factory.Build(intent, snapshots, query.ActionKeyword);
+
+            var diag = _diag;
+            if (diag is not null && diag.Enabled)
+            {
+                // The elapsed time is the point of this line: the query path is
+                // supposed to be a pure cache read, so anything but ~0 ms means
+                // I/O has leaked into it.
+                diag.Write(
+                    "--",
+                    "QUERY",
+                    $"text={DescribeQuery(query)} intent={intent.GetType().Name} results={results.Count} monitors={snapshots.Count} ms={ElapsedMs(started)}");
+            }
+
+            return Task.FromResult(results);
         }
         catch (Exception ex)
         {
@@ -199,6 +253,22 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
     public void Dispose()
     {
+        var diag = _diag;
+        var traced = diag is not null && diag.Enabled;
+        var step = Stopwatch.GetTimestamp();
+
+        void Step(string name)
+        {
+            if (!traced)
+                return;
+
+            // Each step is expected to be sub-millisecond. A step in the
+            // hundreds means something below is blocking the UI thread, which
+            // is the failure this ordering exists to prevent.
+            diag!.Write("--", "DISPOSE.STEP", $"step={name} ms={ElapsedMs(step)}");
+            step = Stopwatch.GetTimestamp();
+        }
+
         try
         {
             _context.API.VisibilityChanged -= OnVisibilityChanged;
@@ -207,6 +277,8 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         {
             // Host may already be tearing the API down.
         }
+
+        Step("visibility-unsubscribe");
 
         // Unsubscribe first, before anything below can block. A worker still in
         // OnServiceStateChanged must not race a disposed timer — and its push
@@ -219,14 +291,23 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             _service.WriteFailed -= OnWriteFailed;
         }
 
+        Step("service-unsubscribe");
+
         _watcher?.Dispose();
         _watcher = null;
+        Step("watcher");
 
         _deferredRefresh?.Dispose();
         _deferredRefresh = null;
+        Step("deferred-timer");
 
         _service?.Dispose();
         _service = null;
+        Step("service");
+
+        // Last, so every step above is already on disk.
+        _diag = null;
+        diag?.Dispose();
     }
 
     private void OnTopologyChanged()
@@ -302,6 +383,10 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             _stateDirty = false;
         }
 
+        var diag = _diag;
+        if (diag is not null && diag.Enabled)
+            diag.Write("--", "REQUERY", $"on=visibility dirty={dirty} hasQuery={lastSeen.Length > 0}");
+
         if (!dirty || lastSeen.Length == 0)
             return;
 
@@ -350,13 +435,23 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             lastQueryAt = _lastQueryAtUtc;
         }
 
+        var diag = _diag;
         var now = DateTime.UtcNow;
         if (rawQuery.Length == 0 || now - lastQueryAt > PushRefreshWindow)
+        {
+            if (diag is not null && diag.Enabled)
+                diag.Write("--", "PUSH", $"decision={(rawQuery.Length == 0 ? "no-context" : "expired")} since_query_ms={(long)(now - lastQueryAt).TotalMilliseconds}");
             return;
+        }
+
         // Flow cancels a query's token when a newer keystroke supersedes it; a
         // stale refresh would overwrite text the user is currently typing.
         if (token.IsCancellationRequested)
+        {
+            if (diag is not null && diag.Enabled)
+                diag.Write("--", "PUSH", "decision=cancelled");
             return;
+        }
 
         lock (_refreshGate)
         {
@@ -383,6 +478,9 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             _pushRefreshInduced = true;
         }
 
+        if (diag is not null && diag.Enabled)
+            diag.Write("--", "PUSH", $"decision=fire fromTimer={fromTimer} since_query_ms={(long)(now - lastQueryAt).TotalMilliseconds}");
+
         try
         {
             _context.API.ChangeQuery(rawQuery, true);
@@ -392,6 +490,47 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             LogError("Push refresh failed", ex);
         }
     }
+
+    /// <summary>
+    /// Timer callbacks run on the thread pool, where an escaping exception is a
+    /// process kill. <c>TopologyWatcher.Fire</c> carries the same guard.
+    /// </summary>
+    private void SafeDeferredRefresh()
+    {
+        try
+        {
+            TryPushRefresh(fromTimer: true);
+        }
+        catch (Exception ex)
+        {
+            LogError("Deferred push refresh failed", ex);
+        }
+    }
+
+    /// <summary>
+    /// Query text for the trace. Under its own action keyword this is the
+    /// plugin's own grammar and safe to record verbatim; configured as a global
+    /// keyword the plugin sees every character typed into the launcher, so only
+    /// the shape of the query is recorded.
+    /// </summary>
+    private static string DescribeQuery(Query query)
+        => string.IsNullOrEmpty(query.ActionKeyword) || query.ActionKeyword == "*"
+            ? $"<global:{query.Search.Length}ch>"
+            : $"\"{query.OriginalQuery}\"";
+
+    private string BuildTraceHeader()
+    {
+        var meta = _context.CurrentPluginMetadata;
+        return string.Join(
+            Environment.NewLine,
+            "== MonitorCowboy diagnostic trace ==",
+            $"   plugin={meta.Version} keyword={meta.ActionKeyword} os={Environment.OSVersion.VersionString} clr={Environment.Version} arch={RuntimeInformation.ProcessArchitecture}",
+            $"   opened={DateTime.Now:yyyy-MM-dd HH:mm:ss zzz}",
+            "   columns: <utc>  t=<ms since open>  <monitor>  <EVENT>  <key=value ...>");
+    }
+
+    private static long ElapsedMs(long startTimestamp)
+        => (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
 
     private void OnWriteFailed(string devicePath, byte code, uint target)
     {
@@ -415,14 +554,20 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     private string AbsoluteIcon(string fileName)
         => Path.Combine(_context.CurrentPluginMetadata.PluginDirectory ?? "", "Images", fileName);
 
+    /// <summary>
+    /// Routes to the host log. An exception is a real failure and is logged as
+    /// one; a bare message is a per-monitor diagnostic (capabilities outcome,
+    /// probe result) and belongs at info level — logging a successful parse as
+    /// a warning, on every machine, is how a shared log stops meaning anything.
+    /// </summary>
     private void LogError(string message, Exception? ex)
     {
         try
         {
             if (ex is not null)
-                _context.API.LogException(nameof(Main), message, ex);
+                _context.API.LogException(LogCategory, message, ex);
             else
-                _context.API.LogWarn(nameof(Main), message);
+                _context.API.LogInfo(LogCategory, message);
         }
         catch
         {

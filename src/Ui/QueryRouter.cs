@@ -15,6 +15,11 @@ public static class QueryRouter
         if (tokens.Length == 0)
             return new MonitorListIntent("");
 
+        // Checked before monitor resolution so that the support command is
+        // reachable on every machine, whatever the monitors happen to be named.
+        if (tokens[0].Equals("debug", StringComparison.OrdinalIgnoreCase))
+            return new DebugMenuIntent(tokens.Length > 1 ? tokens[1] : "");
+
         var monitor = ResolveMonitor(tokens[0], monitors);
         if (monitor is null)
             return new MonitorListIntent(search.Trim());

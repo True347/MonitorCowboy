@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading.Channels;
 using MonitorCowboy.Interop;
 
@@ -27,6 +28,7 @@ public sealed class DdcWorker
     private readonly Action<string, string>? _onCapabilitiesRead;
     private readonly Action<byte, uint>? _onWriteFailed;
     private readonly Action<string>? _diag;
+    private readonly IDiag _trace;
     private readonly Channel<Signal> _signals = Channel.CreateUnbounded<Signal>();
     private readonly ConcurrentDictionary<byte, uint> _pendingWrites = new();
     private readonly CancellationTokenSource _cts = new();
@@ -36,13 +38,15 @@ public sealed class DdcWorker
         MonitorEntry entry,
         Action<string, string>? onCapabilitiesRead,
         Action<byte, uint>? onWriteFailed,
-        Action<string>? diag = null)
+        Action<string>? diag = null,
+        IDiag? trace = null)
     {
         _api = api;
         _entry = entry;
         _onCapabilitiesRead = onCapabilitiesRead;
         _onWriteFailed = onWriteFailed;
         _diag = diag;
+        _trace = trace ?? NullDiag.Instance;
         Completion = Task.Run(ConsumeAsync);
     }
 
@@ -147,24 +151,52 @@ public sealed class DdcWorker
 
     private async Task ExecuteReadCapabilitiesAsync(CancellationToken ct)
     {
+        if (_trace.Enabled)
+            _trace.Write(_entry.Tag, "CAPS.REQ", $"name=\"{_entry.FriendlyName}\" known={_entry.HasKnownCaps}");
+
         for (var attempt = 1; attempt <= CapsReadAttempts; attempt++)
         {
+            var started = Stopwatch.GetTimestamp();
             if (_api.TryGetCapabilitiesString(_entry.Ref, out var raw))
             {
+                if (_trace.Enabled)
+                {
+                    // The literal string is the whole point of tracing this:
+                    // it is the only way to get a real-hardware fixture for the
+                    // parser, and every parse claim is judged against it.
+                    _trace.Write(_entry.Tag, "CAPS.RAW", $"ms={Ms(started)} len={raw.Length} text={Sanitize(raw)}");
+                }
+
                 if (CapabilitiesParser.Parse(raw) is { } caps)
                 {
                     _entry.ApplyCapabilities(caps);
                     _onCapabilitiesRead?.Invoke(_entry.DevicePath, raw);
                     _diag?.Invoke($"{_entry.FriendlyName}: capabilities parsed, {caps.VcpCodes.Count} VCP codes");
+
+                    if (_trace.Enabled)
+                    {
+                        var inputs = string.Join(',', caps.ValuesFor(Vcp.InputSource).Select(v => $"0x{v:X2}"));
+                        _trace.Write(
+                            _entry.Tag,
+                            "CAPS.PARSE",
+                            $"codes={caps.VcpCodes.Count} input={caps.Supports(Vcp.InputSource)} volume={caps.Supports(Vcp.AudioSpeakerVolume)} values=[{inputs}]");
+                        _trace.Write(_entry.Tag, "CAPS.STATE", "state=Ready probed=False");
+                    }
+
                     return;
                 }
 
                 // Readable but unusable — retrying returns the same string.
                 _diag?.Invoke($"{_entry.FriendlyName}: capabilities string has no usable vcp() section (length {raw.Length})");
+                if (_trace.Enabled)
+                    _trace.Write(_entry.Tag, "CAPS.NOVCP", $"len={raw.Length}");
                 break;
             }
 
             _diag?.Invoke($"{_entry.FriendlyName}: capabilities read failed (attempt {attempt}/{CapsReadAttempts}, win32={_api.LastWin32Error})");
+            if (_trace.Enabled)
+                _trace.Write(_entry.Tag, "CAPS.FAIL", $"attempt={attempt}/{CapsReadAttempts} ms={Ms(started)} win32={_api.LastWin32Error}");
+
             if (attempt < CapsReadAttempts)
                 await Task.Delay(CapsRetryDelay, ct).ConfigureAwait(false);
         }
@@ -179,14 +211,21 @@ public sealed class DdcWorker
             var supportsVolume = await ProbeAsync(Vcp.AudioSpeakerVolume, ct).ConfigureAwait(false);
             _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume} (last win32={_api.LastWin32Error})");
 
+            if (_trace.Enabled)
+                _trace.Write(_entry.Tag, "CAPS.PROBE", $"input={supportsInput} volume={supportsVolume} win32={_api.LastWin32Error}");
+
             if (supportsInput || supportsVolume)
             {
                 _entry.ApplyProbedCapabilities(supportsInput, supportsVolume);
+                if (_trace.Enabled)
+                    _trace.Write(_entry.Tag, "CAPS.STATE", "state=Ready probed=True");
                 return;
             }
         }
 
         _entry.MarkCapsReadFailed();
+        if (_trace.Enabled)
+            _trace.Write(_entry.Tag, "CAPS.STATE", $"state={_entry.CapsState} probed=False fellBackToKnown={_entry.HasKnownCaps}");
     }
 
     /// <summary>One retry per probed code: a single transient NAK must not decide support.</summary>
@@ -217,7 +256,7 @@ public sealed class DdcWorker
 
         if (_entry.SupportsInput)
         {
-            if (_api.TryGetVcpFeature(_entry.Ref, Vcp.InputSource, out var input, out _))
+            if (Get(Vcp.InputSource, out var input, out _))
                 _entry.ApplyReadValue(Vcp.InputSource, input, 0);
             else
                 anyFailed = true;
@@ -225,7 +264,7 @@ public sealed class DdcWorker
 
         if (_entry.SupportsVolume)
         {
-            if (_api.TryGetVcpFeature(_entry.Ref, Vcp.AudioSpeakerVolume, out var volume, out var max))
+            if (Get(Vcp.AudioSpeakerVolume, out var volume, out var max))
                 _entry.ApplyReadValue(Vcp.AudioSpeakerVolume, volume, max);
             else
                 anyFailed = true;
@@ -233,6 +272,29 @@ public sealed class DdcWorker
 
         _entry.EndRefresh(anyFailed);
         return true;
+    }
+
+    /// <summary>
+    /// Timed VCP read. The measurement spans the process-wide DDC gate as well
+    /// as the exchange itself, which is deliberate: contention is exactly what
+    /// makes a "40 ms read" not cost 40 ms.
+    /// </summary>
+    private bool Get(byte code, out uint current, out uint max)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var ok = _api.TryGetVcpFeature(_entry.Ref, code, out current, out max);
+
+        if (_trace.Enabled)
+        {
+            _trace.Write(
+                _entry.Tag,
+                "VCP.GET",
+                ok
+                    ? $"code=0x{code:X2} ok=1 cur=0x{current:X2} max={max} ms={Ms(started)}"
+                    : $"code=0x{code:X2} ok=0 ms={Ms(started)} win32={_api.LastWin32Error}");
+        }
+
+        return ok;
     }
 
     private async Task<bool> ExecuteWritesAsync(CancellationToken ct)
@@ -252,8 +314,17 @@ public sealed class DdcWorker
 
     private async Task ExecuteOneWriteAsync(byte code, uint target, CancellationToken ct)
     {
+        var opStarted = Stopwatch.GetTimestamp();
+        var setStarted = opStarted;
+
         if (!_api.TrySetVcpFeature(_entry.Ref, code, target))
         {
+            if (_trace.Enabled)
+            {
+                _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target=0x{target:X2} ok=0 ms={Ms(setStarted)} win32={_api.LastWin32Error}");
+                _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target=0x{target:X2} outcome=failed ms={Ms(opStarted)}");
+            }
+
             // Toast only when the failure was actually recorded — a newer
             // write may have superseded this target already.
             if (_entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed)))
@@ -261,24 +332,38 @@ public sealed class DdcWorker
             return;
         }
 
+        if (_trace.Enabled)
+            _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target=0x{target:X2} ok=1 ms={Ms(setStarted)}");
+
         // The set call returning success means nothing by itself; the only
         // trustworthy signal is reading the value back.
         await Task.Delay(PostSetDelay, ct).ConfigureAwait(false);
 
         for (var attempt = 1; attempt <= VerifyAttempts; attempt++)
         {
-            if (_api.TryGetVcpFeature(_entry.Ref, code, out var current, out var max))
-            {
-                var matches = code == Vcp.InputSource
-                    ? InputSourceNames.SameInput(current, target)
-                    : current == target;
+            var readStarted = Stopwatch.GetTimestamp();
+            var ok = _api.TryGetVcpFeature(_entry.Ref, code, out var current, out var max);
+            var matches = ok && (code == Vcp.InputSource
+                ? InputSourceNames.SameInput(current, target)
+                : current == target);
 
-                if (matches)
-                {
-                    _entry.ApplyReadValue(code, current, max);
-                    _entry.FinishPendingWrite(code, target, null);
-                    return;
-                }
+            if (_trace.Enabled)
+            {
+                _trace.Write(
+                    _entry.Tag,
+                    "VERIFY",
+                    ok
+                        ? $"code=0x{code:X2} target=0x{target:X2} attempt={attempt}/{VerifyAttempts} read=0x{current:X2} match={matches} ms={Ms(readStarted)}"
+                        : $"code=0x{code:X2} target=0x{target:X2} attempt={attempt}/{VerifyAttempts} read=fail ms={Ms(readStarted)} win32={_api.LastWin32Error}");
+            }
+
+            if (matches)
+            {
+                _entry.ApplyReadValue(code, current, max);
+                _entry.FinishPendingWrite(code, target, null);
+                if (_trace.Enabled)
+                    _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target=0x{target:X2} outcome=applied attempts={attempt} ms={Ms(opStarted)}");
+                return;
             }
 
             if (attempt < VerifyAttempts)
@@ -288,6 +373,22 @@ public sealed class DdcWorker
         // Common and expected when the write switched the monitor's input away
         // from this machine; report honestly instead of guessing.
         _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Unverified));
+        if (_trace.Enabled)
+            _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target=0x{target:X2} outcome=unverified attempts={VerifyAttempts} ms={Ms(opStarted)}");
+    }
+
+    private static long Ms(long startTimestamp) => (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+
+    /// <summary>
+    /// Capabilities strings are vendor ASCII and have been seen carrying stray
+    /// control bytes; a trace line must stay one line and stay parseable.
+    /// </summary>
+    private static string Sanitize(string raw)
+    {
+        var buffer = new char[raw.Length];
+        for (var i = 0; i < raw.Length; i++)
+            buffer[i] = raw[i] is '\r' or '\n' or '\t' || char.IsControl(raw[i]) ? '.' : raw[i];
+        return new string(buffer);
     }
 
     private void FailRemainingWrites()

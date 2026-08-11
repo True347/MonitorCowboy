@@ -2,9 +2,9 @@
 
   <PropertyGroup>
     <!--
-      Plain net9.0 on purpose: the suite covers only the pure logic layer
-      (parser, router, models), compiled in by source so it runs on any OS.
-      Windows-only behavior is exercised on real hardware, not here.
+      Plain net9.0 on purpose: the suite covers only the OS-agnostic layer
+      (parser, router, models, settings, diagnostics), compiled in by source so
+      it runs anywhere. Windows-only behavior is exercised on real hardware.
     -->
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
@@ -16,7 +16,10 @@
 
   <ItemGroup>
     <Compile Include="../../src/Core/**/*.cs" LinkBase="Core" />
+    <Compile Include="../../src/Diagnostics/**/*.cs" LinkBase="Diagnostics" />
     <Compile Include="../../src/Interop/INativeMonitorApi.cs" Link="Interop/INativeMonitorApi.cs" />
+    <Compile Include="../../src/PluginSettings.cs" Link="PluginSettings.cs" />
+    <Compile Include="../../src/FlowCapsStore.cs" Link="FlowCapsStore.cs" />
     <Compile Include="../../src/Ui/QueryIntents.cs" Link="Ui/QueryIntents.cs" />
     <Compile Include="../../src/Ui/QueryRouter.cs" Link="Ui/QueryRouter.cs" />
   </ItemGroup>

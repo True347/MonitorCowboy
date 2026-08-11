@@ -193,4 +193,35 @@ public class QueryRouterTests
         Assert.Same(Three[0], intent.Monitor);
         Assert.Equal("hd mi", intent.Filter);
     }
+
+    [Theory]
+    [InlineData("debug", "")]
+    [InlineData("debug on", "on")]
+    [InlineData("debug off", "off")]
+    [InlineData("DEBUG On", "On")]
+    [InlineData("  debug   off  ", "off")]
+    public void DebugToken_RoutesToDiagnosticsView(string search, string expectedArgument)
+    {
+        var intent = Assert.IsType<DebugMenuIntent>(QueryRouter.Parse(search, Three));
+        Assert.Equal(expectedArgument, intent.Argument);
+    }
+
+    [Fact]
+    public void DebugToken_WinsOverAMonitorOfThatName()
+    {
+        // The support command must be reachable whatever the hardware is
+        // called; that monitor stays addressable by its ordinal.
+        IReadOnlyList<MonitorSnapshot> monitors = [Monitor(1, "Debug Panel HD")];
+
+        Assert.IsType<DebugMenuIntent>(QueryRouter.Parse("debug", monitors));
+        Assert.IsType<MonitorMenuIntent>(QueryRouter.Parse("1", monitors));
+    }
+
+    [Fact]
+    public void DebugTokenDeeperInTheQuery_IsNotADiagnosticsRequest()
+    {
+        // Only the first token opens the view; "1 debug" is an unknown
+        // sub-token on monitor 1 and must stay on its menu.
+        Assert.IsType<MonitorMenuIntent>(QueryRouter.Parse("1 debug", Three));
+    }
 }
