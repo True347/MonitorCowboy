@@ -10,6 +10,16 @@ Flow SDK dll) and creates the GitHub release. Pushes while the current version
 is already released are no-ops, so committing freely is safe — cutting a
 release is done by bumping `Version` in `plugin.json`.
 
+## Always let CI build the artifact
+
+`dotnet publish` emits a different `MonitorCowboy.deps.json` depending on the
+operating system it runs on — verified with identical SDK (9.0.316) and an
+unchanged csproj. Publishing on Windows lists only the project itself;
+publishing on Linux additionally names `Flow.Launcher.Plugin` and its
+`JetBrains.Annotations` dependency in the graph. Neither entry carries runtime
+assets, so nothing is loaded from them either way, but the shipped artifact
+must be the Windows one. Build releases through the workflow, never by hand.
+
 ## Pre-release checklist (real hardware)
 
 - `pm install <release zip URL>` into a real Flow Launcher on Windows.

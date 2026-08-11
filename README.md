@@ -131,6 +131,10 @@ Three cache layers back the UI, and only the middle one touches disk:
 Deleting that file costs nothing but one slow re-read. Flow's **Reload Plugin Data** clears it
 and re-enumerates everything from scratch.
 
+Diagnostic traces, when you turn them on, are written alongside it in a `diagnostics\` subfolder —
+the newest three, capped at 5 MB each. They record monitor device paths and the text typed after
+the keyword, so read one before sending it anywhere.
+
 ---
 
 ## Troubleshooting
@@ -151,6 +155,10 @@ and re-enumerates everything from scratch.
   read. Wait out the ~10 s TTL or force it with Shift+Enter → *Refresh values*.
 - **Nothing happens / errors** — check Flow's logs at `%APPDATA%\FlowLauncher\Logs\`; capability
   reads and probe results are logged per monitor.
+- **Something is wrong and the log does not explain it** — type `mc debug on`. Every DDC/CI
+  exchange, with its latency and outcome, is then recorded to a file under the folder below, which
+  `mc debug` will open for you. It costs nothing while off, which is the default. `mc debug off`
+  stops it; the file stays.
 
 ---
 
