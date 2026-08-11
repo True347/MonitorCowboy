@@ -36,8 +36,12 @@ must be the Windows one. Build releases through the workflow, never by hand.
    `https://cdn.jsdelivr.net/gh/True347/MonitorCowboy@main/Images/app.png`
 4. Fork `Flow-Launcher/Flow.Launcher.PluginsManifest`, add
    `plugins/MonitorCowboy-baf19c15c7054fcfb2ad422fb9dc161d.json` (copy from
-   this folder) **on the `plugin_api_v2` branch**, and open a PR targeting
-   `plugin_api_v2`. A PR against the wrong branch will not be listed.
+   this folder) **on the `main` branch**, and open a PR targeting `main` that
+   touches nothing else — a plugin submission changing any file outside
+   `plugins/*.json` is rejected by CI. Disregard `plugin_api_v2` and the README
+   still served from it: that branch was the submission target until September
+   2025 and continues to point at itself, but it has been unmaintained since,
+   and a manifest landing there is never listed.
 5. Wait for manual approval by the Flow Launcher team. Manifest CDN
    propagation can take days.
 
