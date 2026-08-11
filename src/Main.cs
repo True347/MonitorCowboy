@@ -437,10 +437,21 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
         var diag = _diag;
         var now = DateTime.UtcNow;
-        if (rawQuery.Length == 0 || now - lastQueryAt > PushRefreshWindow)
+
+        // Split from the staleness check below on purpose: with no query yet
+        // there is no elapsed time to report, and reporting one anyway printed
+        // the span since DateTime.MinValue.
+        if (rawQuery.Length == 0)
         {
             if (diag is not null && diag.Enabled)
-                diag.Write("--", "PUSH", $"decision={(rawQuery.Length == 0 ? "no-context" : "expired")} since_query_ms={(long)(now - lastQueryAt).TotalMilliseconds}");
+                diag.Write("--", "PUSH", "decision=no-context");
+            return;
+        }
+
+        if (now - lastQueryAt > PushRefreshWindow)
+        {
+            if (diag is not null && diag.Enabled)
+                diag.Write("--", "PUSH", $"decision=expired since_query_ms={(long)(now - lastQueryAt).TotalMilliseconds}");
             return;
         }
 
