@@ -37,6 +37,11 @@ public static class QueryRouter
                 ? new VolumeMenuIntent(monitor, tokens.Length > 2 ? tokens[2] : "")
                 : new MonitorMenuIntent(monitor);
 
+        if (IsSynonym(tokens[1], "bri", "brightness", "bright", "b"))
+            return monitor.SupportsBrightness
+                ? new BrightnessMenuIntent(monitor, tokens.Length > 2 ? tokens[2] : "")
+                : new MonitorMenuIntent(monitor);
+
         // Unknown sub-token: stay on the monitor's menu instead of erroring out.
         return new MonitorMenuIntent(monitor);
     }

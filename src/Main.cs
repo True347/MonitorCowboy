@@ -14,6 +14,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
     private static readonly TimeSpan PushRefreshWindow = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PushRefreshThrottle = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan ToastThrottle = TimeSpan.FromSeconds(5);
 
     private PluginInitContext _context = null!;
     private MonitorService? _service;
@@ -23,6 +24,8 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     private Timer? _deferredRefresh;
 
     private readonly object _refreshGate = new();
+    private readonly object _toastGate = new();
+    private readonly Dictionary<(string DevicePath, byte Code), DateTime> _lastToastUtc = new();
     private string _lastRawQuery = "";
     private string _lastSeenQuery = "";
     private bool _stateDirty;
@@ -198,7 +201,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             new Result
             {
                 Title = "Refresh values",
-                SubTitle = "Re-read the current input and volume of this monitor.",
+                SubTitle = "Re-read the current input, brightness, and volume of this monitor.",
                 IcoPath = "Images/monitor.png",
                 AddSelectedCount = false,
                 Action = _ => RunMaintenance(() => service.RequestValueReread(devicePath)),
@@ -324,6 +327,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         MonitorMenuIntent m => m.Monitor.DevicePath,
         InputMenuIntent m => m.Monitor.DevicePath,
         VolumeMenuIntent m => m.Monitor.DevicePath,
+        BrightnessMenuIntent m => m.Monitor.DevicePath,
         _ => null,
     };
 
@@ -543,21 +547,56 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
     private static long ElapsedMs(long startTimestamp)
         => (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
 
-    private void OnWriteFailed(string devicePath, byte code, uint target)
+    /// <summary>
+    /// Policy layer: how loudly each write outcome is reported, per feature.
+    /// A rejected brightness write is the silent-failure shape this plugin
+    /// promises to surface (the monitor confirmed it kept its value — HDR or
+    /// a picture mode is likely holding it). Other rejections stay on the
+    /// result badge: a slow input switch can report its old value for the
+    /// whole verify window, and a toast there would cry wolf.
+    /// </summary>
+    private void OnWriteFailed(string devicePath, byte code, uint target, OpPhase phase)
     {
-        var feature = code == Vcp.InputSource ? "input source" : "volume";
+        if (phase == OpPhase.Rejected && code != Vcp.Luminance)
+            return;
+
+        if (!TryBeginToast(devicePath, code))
+            return;
+
         var name = _service?.GetSnapshots().FirstOrDefault(s => s.DevicePath == devicePath)?.FriendlyName ?? "The monitor";
+        var (title, message) = (phase, code) switch
+        {
+            (OpPhase.Rejected, _) => ("MonitorCowboy: brightness unchanged",
+                $"{name} kept its brightness unchanged — it may be locked by HDR, dynamic contrast, or a picture mode."),
+            (_, Vcp.Luminance) => ("MonitorCowboy: set failed",
+                $"{name} rejected the brightness change. If HDR or a special picture mode is active, it may be refusing brightness control."),
+            (_, Vcp.InputSource) => ("MonitorCowboy: set failed", $"{name} rejected the input source change."),
+            _ => ("MonitorCowboy: set failed", $"{name} rejected the volume change."),
+        };
 
         try
         {
-            _context.API.ShowMsg(
-                "MonitorCowboy: set failed",
-                $"{name} rejected the {feature} change.",
-                AbsoluteIcon("error.png"));
+            _context.API.ShowMsg(title, message, AbsoluteIcon("error.png"));
         }
         catch (Exception ex)
         {
             LogError("ShowMsg failed", ex);
+        }
+    }
+
+    /// <summary>
+    /// Repeated step presses against a locked monitor end as one rejection per
+    /// executed write; one toast per monitor+feature per window is enough.
+    /// </summary>
+    private bool TryBeginToast(string devicePath, byte code)
+    {
+        var now = DateTime.UtcNow;
+        lock (_toastGate)
+        {
+            if (_lastToastUtc.TryGetValue((devicePath, code), out var last) && now - last < ToastThrottle)
+                return false;
+            _lastToastUtc[(devicePath, code)] = now;
+            return true;
         }
     }
 

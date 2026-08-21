@@ -18,8 +18,14 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
     /// <summary>When false, a successful set does not change the stored value (verify will mismatch).</summary>
     public bool ApplyWrites { get; set; } = true;
 
+    /// <summary>Transforms the value a successful set stores (simulates clamping/quantizing panels); identity when null.</summary>
+    public Func<byte, uint, uint>? WriteTransform { get; set; }
+
     /// <summary>Runs at the start of every set call; lets a test block the consumer deterministically.</summary>
     public Action? BeforeSet { get; set; }
+
+    /// <summary>Runs at the start of every get call; lets a test change behavior mid-verify (e.g. channel dies after one read).</summary>
+    public Action? BeforeGet { get; set; }
 
     public string? Capabilities { get; set; }
 
@@ -42,6 +48,8 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
 
     public bool TryGetVcpFeature(MonitorRef monitor, byte code, out uint currentValue, out uint maximumValue)
     {
+        BeforeGet?.Invoke();
+
         currentValue = 0;
         maximumValue = 0;
         if (FailGet)
@@ -69,7 +77,7 @@ internal sealed class FakeNativeMonitorApi : INativeMonitorApi
             if (ApplyWrites)
             {
                 var max = _values.TryGetValue(code, out var v) ? v.Max : 100u;
-                _values[code] = (value, max);
+                _values[code] = (WriteTransform?.Invoke(code, value) ?? value, max);
             }
             return true;
         }

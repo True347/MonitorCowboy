@@ -6,7 +6,7 @@ namespace MonitorCowboy.Tests;
 
 public class QueryRouterTests
 {
-    private static MonitorSnapshot Monitor(int index, string name, bool input = true, bool volume = true)
+    private static MonitorSnapshot Monitor(int index, string name, bool input = true, bool volume = true, bool brightness = true)
         => new()
         {
             Index = index,
@@ -15,6 +15,7 @@ public class QueryRouterTests
             CapsState = CapsState.Ready,
             SupportsInput = input,
             SupportsVolume = volume,
+            SupportsBrightness = brightness,
         };
 
     // Every name contains a digit so ordinal-vs-name priority is actually exercised.
@@ -177,9 +178,40 @@ public class QueryRouterTests
     }
 
     [Theory]
+    [InlineData("bri")]
+    [InlineData("BRIGHTNESS")]
+    [InlineData("bright")]
+    [InlineData("b")]
+    [InlineData("B")]
+    public void BrightnessSynonyms_RouteToBrightnessMenu(string sub)
+    {
+        var intent = Assert.IsType<BrightnessMenuIntent>(QueryRouter.Parse($"3 {sub}", Three));
+        Assert.Same(Three[2], intent.Monitor);
+        Assert.Equal("", intent.ValueToken);
+    }
+
+    [Theory]
+    [InlineData("70", "70")]
+    [InlineData("150", "150")]
+    [InlineData("abc", "abc")]
+    public void BrightnessValueToken_PassesThroughUnvalidated(string token, string expected)
+    {
+        var intent = Assert.IsType<BrightnessMenuIntent>(QueryRouter.Parse($"1 bri {token}", Three));
+        Assert.Equal(expected, intent.ValueToken);
+    }
+
+    [Fact]
+    public void BrightnessOnUnsupportedMonitor_FallsBackToMonitorMenu()
+    {
+        IReadOnlyList<MonitorSnapshot> monitors = [Monitor(1, "DELL U2723QE", brightness: false)];
+        var intent = Assert.IsType<MonitorMenuIntent>(QueryRouter.Parse("1 bri 70", monitors));
+        Assert.Same(monitors[0], intent.Monitor);
+    }
+
+    [Theory]
     [InlineData("1 bogus")]
     [InlineData("1 invol")]
-    [InlineData("1 brightness 50")]
+    [InlineData("1 lum 50")]
     public void UnknownSubToken_StaysOnMonitorMenu(string search)
     {
         var intent = Assert.IsType<MonitorMenuIntent>(QueryRouter.Parse(search, Three));

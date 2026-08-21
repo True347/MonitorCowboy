@@ -3,6 +3,7 @@ namespace MonitorCowboy.Core;
 /// <summary>VCP feature codes used by this plugin (MCCS).</summary>
 public static class Vcp
 {
+    public const byte Luminance = 0x10;
     public const byte InputSource = 0x60;
     public const byte AudioSpeakerVolume = 0x62;
 }

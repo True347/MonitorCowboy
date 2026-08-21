@@ -23,11 +23,19 @@ public enum OpPhase
     /// <summary>Enqueued or executing; final outcome unknown.</summary>
     Pending,
 
-    /// <summary>Set was sent but the read-back failed or mismatched (common right after switching inputs away).</summary>
+    /// <summary>Set was sent but the read-back itself failed (common right after switching inputs away); outcome genuinely unknown.</summary>
     Unverified,
 
     /// <summary>The set call itself failed.</summary>
     Failed,
+
+    /// <summary>
+    /// Set was sent and the read-back succeeded but reported an unchanged
+    /// value: the monitor swallowed the write (e.g. brightness locked by HDR
+    /// or a picture mode). Unlike Unverified, the monitor itself told us the
+    /// write did not take.
+    /// </summary>
+    Rejected,
 }
 
 /// <summary>An in-flight (or just-finished) write against a single VCP code.</summary>
@@ -63,6 +71,9 @@ public sealed record MonitorSnapshot
     /// <summary>True when the capabilities string lists VCP 0x62.</summary>
     public bool SupportsVolume { get; init; }
 
+    /// <summary>True when the capabilities string lists VCP 0x10.</summary>
+    public bool SupportsBrightness { get; init; }
+
     /// <summary>Raw 0x60 values accepted by this monitor, in capabilities order.</summary>
     public IReadOnlyList<uint> InputValues { get; init; } = [];
 
@@ -75,6 +86,20 @@ public sealed record MonitorSnapshot
     /// <summary>Maximum for 0x62 as reported by the monitor; 0 while unknown.</summary>
     public uint VolumeMax { get; init; }
 
+    /// <summary>Last read 0x10 value; null when unknown/unsupported.</summary>
+    public uint? CurrentBrightness { get; init; }
+
+    /// <summary>Maximum for 0x10 as reported by the monitor; 0 while unknown.</summary>
+    public uint BrightnessMax { get; init; }
+
+    /// <summary>
+    /// True for a while after a brightness write ended as Rejected. The badge
+    /// itself is cleared by the next background read (the read succeeds even
+    /// while brightness is locked), so this is what keeps the menu honest
+    /// about a monitor that is likely still locked by HDR or a picture mode.
+    /// </summary>
+    public bool BrightnessRecentlyRejected { get; init; }
+
     /// <summary>True when the last read attempt failed (asleep/off/NAK); values may be outdated.</summary>
     public bool ValuesStale { get; init; }
 
@@ -84,4 +109,6 @@ public sealed record MonitorSnapshot
     public PendingWrite? PendingInput { get; init; }
 
     public PendingWrite? PendingVolume { get; init; }
+
+    public PendingWrite? PendingBrightness { get; init; }
 }

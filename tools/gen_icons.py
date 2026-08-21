@@ -7,6 +7,7 @@ transparent corners. Rendered at 4x and downscaled with LANCZOS.
 Usage: python tools/gen_icons.py
 """
 
+import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -86,6 +87,22 @@ def draw_volume(draw, accent):
         )
 
 
+def draw_brightness(draw, accent):
+    del accent
+    # Sun: filled core plus eight round-capped rays.
+    draw.ellipse(sbox(92, 92, 164, 164), fill=WHITE)
+    for i in range(8):
+        angle = i * math.pi / 4
+        cos, sin = math.cos(angle), math.sin(angle)
+        capped_line(
+            draw,
+            128 + 58 * cos, 128 + 58 * sin,
+            128 + 80 * cos, 128 + 80 * sin,
+            width=20,
+            fill=WHITE,
+        )
+
+
 def draw_back(draw, accent):
     del accent
     draw.rounded_rectangle(sbox(112, 112, 210, 144), radius=s(14), fill=WHITE)
@@ -122,6 +139,7 @@ ICONS = [
     ("monitor.png", (0x2B, 0x6C, 0xB0, 0xFF), draw_monitor),
     ("input.png", (0x6B, 0x46, 0xC1, 0xFF), draw_input),
     ("volume.png", (0x2F, 0x85, 0x5A, 0xFF), draw_volume),
+    ("brightness.png", (0x2C, 0x7A, 0x7B, 0xFF), draw_brightness),
     ("back.png", (0x4A, 0x55, 0x68, 0xFF), draw_back),
     ("warning.png", (0xC0, 0x56, 0x21, 0xFF), draw_warning),
     ("error.png", (0xC5, 0x30, 0x30, 0xFF), draw_error),

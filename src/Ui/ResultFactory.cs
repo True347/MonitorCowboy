@@ -16,11 +16,13 @@ public sealed class ResultFactory
     private const string IconMonitor = "Images/monitor.png";
     private const string IconInput = "Images/input.png";
     private const string IconVolume = "Images/volume.png";
+    private const string IconBrightness = "Images/brightness.png";
     private const string IconBack = "Images/back.png";
     private const string IconWarning = "Images/warning.png";
     private const string IconError = "Images/error.png";
 
     private const int VolumeStep = 5;
+    private const int BrightnessStep = 5;
 
     private readonly IPublicAPI _api;
     private readonly MonitorService _service;
@@ -61,6 +63,7 @@ public sealed class ResultFactory
             MonitorMenuIntent menu => BuildMonitorMenu(menu.Monitor, prefix),
             InputMenuIntent input => BuildInputMenu(input.Monitor, input.Filter, prefix),
             VolumeMenuIntent volume => BuildVolumeMenu(volume.Monitor, volume.ValueToken, prefix),
+            BrightnessMenuIntent brightness => BuildBrightnessMenu(brightness.Monitor, brightness.ValueToken, prefix),
             DebugMenuIntent debug => BuildDebugMenu(debug.Argument, prefix),
             _ => BuildMonitorList(monitors, "", prefix),
         };
@@ -143,6 +146,20 @@ public sealed class ResultFactory
                         contextData: m.DevicePath));
                 }
 
+                if (m.SupportsBrightness)
+                {
+                    var target = $"{prefix}{m.Index} bri ";
+                    var subtitle = m.BrightnessRecentlyRejected
+                        ? $"Current: {BrightnessPart(m)} · a recent write was rejected — may be locked by HDR / picture mode"
+                        : $"Current: {BrightnessPart(m)}";
+                    results.Add(Item(
+                        "Brightness",
+                        subtitle,
+                        IconBrightness, 45, target,
+                        _ => { _api.ChangeQuery(target, true); return false; },
+                        contextData: m.DevicePath));
+                }
+
                 if (m.SupportsVolume)
                 {
                     var target = $"{prefix}{m.Index} vol ";
@@ -154,11 +171,11 @@ public sealed class ResultFactory
                         contextData: m.DevicePath));
                 }
 
-                if (!m.SupportsInput && !m.SupportsVolume)
+                if (!m.SupportsInput && !m.SupportsBrightness && !m.SupportsVolume)
                 {
                     results.Add(Item(
                         "No controllable features",
-                        "This monitor's capabilities list neither input source (0x60) nor speaker volume (0x62).",
+                        "This monitor's capabilities list none of input source (0x60), brightness (0x10), or speaker volume (0x62).",
                         IconWarning, 50, view, _ => false, contextData: m.DevicePath));
                 }
 
@@ -201,6 +218,9 @@ public sealed class ResultFactory
                     OpPhase.Pending => "Applying…",
                     OpPhase.Unverified => "Sent — could not verify (expected when the input switched away).",
                     OpPhase.Failed => "Set failed — the monitor rejected the command.",
+                    // Soft wording on purpose: a slow switch can keep reporting
+                    // the old input for the whole verify window.
+                    OpPhase.Rejected => "Sent, but the monitor reports the input did not change.",
                     _ => subtitle,
                 };
             }
@@ -303,8 +323,81 @@ public sealed class ResultFactory
             var up = Math.Min(stepBase.Value + VolumeStep, m.VolumeMax);
             var down = stepBase.Value >= VolumeStep ? stepBase.Value - VolumeStep : 0;
 
-            results.Add(StepItem($"Volume +{VolumeStep}", up, devicePath, view, 90));
-            results.Add(StepItem($"Volume -{VolumeStep}", down, devicePath, view, 80));
+            results.Add(StepItem($"Volume +{VolumeStep}", Vcp.AudioSpeakerVolume, up, devicePath, view, IconVolume, 90));
+            results.Add(StepItem($"Volume -{VolumeStep}", Vcp.AudioSpeakerVolume, down, devicePath, view, IconVolume, 80));
+        }
+
+        results.Add(BackItem($"{prefix}{m.Index} "));
+        return results;
+    }
+
+    private List<Result> BuildBrightnessMenu(MonitorSnapshot m, string valueToken, string prefix)
+    {
+        if (m.CapsState != CapsState.Ready || !m.SupportsBrightness)
+            return BuildMonitorMenu(m, prefix);
+
+        var results = new List<Result>();
+        var devicePath = m.DevicePath;
+        var view = $"{prefix}{m.Index} bri ";
+
+        results.Add(Item(
+            m.CurrentBrightness.HasValue && m.BrightnessMax > 0
+                ? $"Brightness: {m.CurrentBrightness} / {m.BrightnessMax}"
+                : "Brightness: reading…",
+            BrightnessStatus(m),
+            IconBrightness, 100, view, _ => false));
+
+        if (valueToken.Length > 0)
+        {
+            if (!uint.TryParse(valueToken, out var requested))
+            {
+                results.Add(Item(
+                    $"Not a number: '{valueToken}'",
+                    "Type a brightness value, e.g. 70.",
+                    IconError, 200, view, _ => false));
+            }
+            else if (m.BrightnessMax == 0)
+            {
+                // Never send an unvalidated value to the hardware: until the
+                // monitor's maximum has been read there is no range to check.
+                results.Add(Item(
+                    "Brightness range not read yet",
+                    "Try again in a moment — the monitor's maximum has not been read.",
+                    IconWarning, 200, view, _ => false));
+            }
+            else if (requested > m.BrightnessMax)
+            {
+                results.Add(Item(
+                    $"Out of range (0–{m.BrightnessMax})",
+                    $"This monitor accepts brightness values up to {m.BrightnessMax}.",
+                    IconError, 200, view, _ => false));
+            }
+            else
+            {
+                results.Add(Item(
+                    $"Set brightness to {requested}",
+                    $"Apply to {m.FriendlyName}.",
+                    IconBrightness, 200, view,
+                    _ =>
+                    {
+                        if (!_service.RequestWrite(devicePath, Vcp.Luminance, requested))
+                            NotifyRebuilding();
+                        _api.ChangeQuery(view, true);
+                        return false;
+                    }));
+            }
+        }
+
+        // Steps compound from the newest intended value, not the (possibly
+        // stale) read-back — rapid presses must accumulate, not merge.
+        var stepBase = m.PendingBrightness is { Phase: OpPhase.Pending } p ? p.Target : m.CurrentBrightness;
+        if (stepBase.HasValue && m.BrightnessMax > 0)
+        {
+            var up = Math.Min(stepBase.Value + BrightnessStep, m.BrightnessMax);
+            var down = stepBase.Value >= BrightnessStep ? stepBase.Value - BrightnessStep : 0;
+
+            results.Add(StepItem($"Brightness +{BrightnessStep}", Vcp.Luminance, up, devicePath, view, IconBrightness, 90));
+            results.Add(StepItem($"Brightness -{BrightnessStep}", Vcp.Luminance, down, devicePath, view, IconBrightness, 80));
         }
 
         results.Add(BackItem($"{prefix}{m.Index} "));
@@ -379,15 +472,15 @@ public sealed class ResultFactory
         return results;
     }
 
-    private Result StepItem(string title, uint target, string devicePath, string view, int score) => Item(
+    private Result StepItem(string title, byte code, uint target, string devicePath, string view, string icon, int score) => Item(
         title,
         $"→ {target}",
-        IconVolume,
+        icon,
         score,
         view,
         _ =>
         {
-            if (!_service.RequestWrite(devicePath, Vcp.AudioSpeakerVolume, target))
+            if (!_service.RequestWrite(devicePath, code, target))
                 NotifyRebuilding();
             _api.ChangeQuery(view, true);
             return false;
@@ -426,13 +519,15 @@ public sealed class ResultFactory
                 return "DDC/CI not supported";
         }
 
-        var parts = new List<string>(3);
+        var parts = new List<string>(4);
         if (m.SupportsInput)
             parts.Add($"Input: {InputPart(m)}");
+        if (m.SupportsBrightness)
+            parts.Add($"Brightness: {BrightnessPart(m)}");
         if (m.SupportsVolume)
             parts.Add($"Volume: {VolumePart(m)}");
         if (parts.Count == 0)
-            parts.Add("No input/volume controls");
+            parts.Add("No controllable features");
         if (m.ValuesStale)
             parts.Add("stale");
         if (m.RefreshInFlight)
@@ -450,6 +545,7 @@ public sealed class ResultFactory
                 OpPhase.Pending => $"applying… → {InputSourceNames.NameOf(p.Target)}",
                 OpPhase.Unverified => $"{InputSourceNames.NameOf(p.Target)}? (unverified)",
                 OpPhase.Failed => "set failed",
+                OpPhase.Rejected => "did not switch",
                 _ => Current(),
             };
         }
@@ -468,6 +564,7 @@ public sealed class ResultFactory
                 OpPhase.Pending => $"applying… → {p.Target}",
                 OpPhase.Unverified => $"{p.Target}? (unverified)",
                 OpPhase.Failed => "set failed",
+                OpPhase.Rejected => "rejected (unchanged)",
                 _ => Current(),
             };
         }
@@ -482,7 +579,38 @@ public sealed class ResultFactory
         { Phase: OpPhase.Pending } p => $"Applying… (target: {p.Target})",
         { Phase: OpPhase.Unverified } => "Sent — could not verify.",
         { Phase: OpPhase.Failed } => "Set failed — the monitor rejected the command.",
+        { Phase: OpPhase.Rejected } => "Rejected — the monitor kept its previous value.",
         _ => "Type a value to set it, or use the step items below.",
+    };
+
+    private static string BrightnessPart(MonitorSnapshot m)
+    {
+        if (m.PendingBrightness is { } p)
+        {
+            return p.Phase switch
+            {
+                OpPhase.Pending => $"applying… → {p.Target}",
+                OpPhase.Unverified => $"{p.Target}? (unverified)",
+                OpPhase.Failed => "set failed",
+                OpPhase.Rejected => "rejected (unchanged)",
+                _ => Current(),
+            };
+        }
+
+        return Current();
+
+        string Current() => m.CurrentBrightness?.ToString() ?? "…";
+    }
+
+    private static string BrightnessStatus(MonitorSnapshot m) => m.PendingBrightness switch
+    {
+        { Phase: OpPhase.Pending } p => $"Applying… (target: {p.Target})",
+        { Phase: OpPhase.Unverified } => "Sent — could not verify.",
+        { Phase: OpPhase.Failed } => "Set failed — the monitor rejected the command.",
+        { Phase: OpPhase.Rejected } => "Rejected — the monitor kept its previous value (possibly locked by HDR / picture mode).",
+        _ => m.BrightnessRecentlyRejected
+            ? "A recent write was rejected — brightness may be locked by HDR or a picture mode."
+            : "Type a value to set it, or use the step items below.",
     };
 
     private Result Item(

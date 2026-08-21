@@ -23,10 +23,17 @@ public sealed class DdcWorker
     private const int VerifyAttempts = 3;
     private const int CapsReadAttempts = 2;
 
+    /// <summary>
+    /// Some panels clamp or quantize brightness (set 80, read 79). Treating
+    /// that as a rejection would raise a false "locked" alarm, so the verify
+    /// allows a small band; a genuinely swallowed write reads back far outside it.
+    /// </summary>
+    private const uint BrightnessVerifyTolerance = 2;
+
     private readonly INativeMonitorApi _api;
     private readonly MonitorEntry _entry;
     private readonly Action<string, string>? _onCapabilitiesRead;
-    private readonly Action<byte, uint>? _onWriteFailed;
+    private readonly Action<byte, uint, OpPhase>? _onWriteFailed;
     private readonly Action<string>? _diag;
     private readonly IDiag _trace;
     private readonly Channel<Signal> _signals = Channel.CreateUnbounded<Signal>();
@@ -37,7 +44,7 @@ public sealed class DdcWorker
         INativeMonitorApi api,
         MonitorEntry entry,
         Action<string, string>? onCapabilitiesRead,
-        Action<byte, uint>? onWriteFailed,
+        Action<byte, uint, OpPhase>? onWriteFailed,
         Action<string>? diag = null,
         IDiag? trace = null)
     {
@@ -179,7 +186,7 @@ public sealed class DdcWorker
                         _trace.Write(
                             _entry.Tag,
                             "CAPS.PARSE",
-                            $"codes={caps.VcpCodes.Count} input={caps.Supports(Vcp.InputSource)} volume={caps.Supports(Vcp.AudioSpeakerVolume)} values=[{inputs}]");
+                            $"codes={caps.VcpCodes.Count} input={caps.Supports(Vcp.InputSource)} volume={caps.Supports(Vcp.AudioSpeakerVolume)} brightness={caps.Supports(Vcp.Luminance)} values=[{inputs}]");
                         _trace.Write(_entry.Tag, "CAPS.STATE", "state=Ready probed=False");
                     }
 
@@ -209,14 +216,15 @@ public sealed class DdcWorker
         {
             var supportsInput = await ProbeAsync(Vcp.InputSource, ct).ConfigureAwait(false);
             var supportsVolume = await ProbeAsync(Vcp.AudioSpeakerVolume, ct).ConfigureAwait(false);
-            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume} (last win32={Win32()})");
+            var supportsBrightness = await ProbeAsync(Vcp.Luminance, ct).ConfigureAwait(false);
+            _diag?.Invoke($"{_entry.FriendlyName}: VCP probe input={supportsInput} volume={supportsVolume} brightness={supportsBrightness} (last win32={Win32()})");
 
             if (_trace.Enabled)
-                _trace.Write(_entry.Tag, "CAPS.PROBE", $"input={supportsInput} volume={supportsVolume} win32={Win32()}");
+                _trace.Write(_entry.Tag, "CAPS.PROBE", $"input={supportsInput} volume={supportsVolume} brightness={supportsBrightness} win32={Win32()}");
 
-            if (supportsInput || supportsVolume)
+            if (supportsInput || supportsVolume || supportsBrightness)
             {
-                _entry.ApplyProbedCapabilities(supportsInput, supportsVolume);
+                _entry.ApplyProbedCapabilities(supportsInput, supportsVolume, supportsBrightness);
                 if (_trace.Enabled)
                     _trace.Write(_entry.Tag, "CAPS.STATE", "state=Ready probed=True");
                 return;
@@ -266,6 +274,14 @@ public sealed class DdcWorker
         {
             if (Get(Vcp.AudioSpeakerVolume, out var volume, out var max))
                 _entry.ApplyReadValue(Vcp.AudioSpeakerVolume, volume, max);
+            else
+                anyFailed = true;
+        }
+
+        if (_entry.SupportsBrightness)
+        {
+            if (Get(Vcp.Luminance, out var brightness, out var max))
+                _entry.ApplyReadValue(Vcp.Luminance, brightness, max);
             else
                 anyFailed = true;
         }
@@ -328,7 +344,7 @@ public sealed class DdcWorker
             // Toast only when the failure was actually recorded — a newer
             // write may have superseded this target already.
             if (_entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Failed)))
-                _onWriteFailed?.Invoke(code, target);
+                _onWriteFailed?.Invoke(code, target, OpPhase.Failed);
             return;
         }
 
@@ -339,13 +355,20 @@ public sealed class DdcWorker
         // trustworthy signal is reading the value back.
         await Task.Delay(PostSetDelay, ct).ConfigureAwait(false);
 
+        // Classification below keys off the FINAL attempt only: an early read
+        // that answered with the old value followed by dead reads is the
+        // canonical input-switch shape and must stay Unverified, not Rejected.
+        var lastAttemptOk = false;
+        uint lastCurrent = 0, lastMax = 0;
+
         for (var attempt = 1; attempt <= VerifyAttempts; attempt++)
         {
             var readStarted = Stopwatch.GetTimestamp();
             var ok = _api.TryGetVcpFeature(_entry.Ref, code, out var current, out var max);
-            var matches = ok && (code == Vcp.InputSource
-                ? InputSourceNames.SameInput(current, target)
-                : current == target);
+            var matches = ok && Matches(code, current, target);
+            lastAttemptOk = ok;
+            if (ok)
+                (lastCurrent, lastMax) = (current, max);
 
             if (_trace.Enabled)
             {
@@ -370,12 +393,37 @@ public sealed class DdcWorker
                 await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), ct).ConfigureAwait(false);
         }
 
-        // Common and expected when the write switched the monitor's input away
-        // from this machine; report honestly instead of guessing.
+        if (lastAttemptOk)
+        {
+            // The monitor is still answering and reported the value unchanged:
+            // it swallowed the write (brightness locked by HDR or a picture
+            // mode, an input value the monitor does not accept, ...). That is
+            // a definite outcome, not an unknown — record the real value and
+            // let the edge layers decide how loudly to report it per feature.
+            _entry.ApplyReadValue(code, lastCurrent, lastMax);
+            if (_entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Rejected)))
+                _onWriteFailed?.Invoke(code, target, OpPhase.Rejected);
+            if (_trace.Enabled)
+                _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target={Val(code, target)} outcome=rejected read={Val(code, lastCurrent)} attempts={VerifyAttempts} ms={Ms(opStarted)}");
+            return;
+        }
+
+        // The final read-back failed — common and expected when the write
+        // switched the monitor's input away from this machine; report honestly
+        // instead of guessing.
         _entry.FinishPendingWrite(code, target, new PendingWrite(target, OpPhase.Unverified));
         if (_trace.Enabled)
             _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target={Val(code, target)} outcome=unverified attempts={VerifyAttempts} ms={Ms(opStarted)}");
     }
+
+    /// <summary>Per-code read-back comparison for verify-after-set.</summary>
+    private static bool Matches(byte code, uint read, uint target) => code switch
+    {
+        // Reads may carry vendor flags in the high bytes.
+        Vcp.InputSource => InputSourceNames.SameInput(read, target),
+        Vcp.Luminance => (read >= target ? read - target : target - read) <= BrightnessVerifyTolerance,
+        _ => read == target,
+    };
 
     private static long Ms(long startTimestamp) => (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
 

@@ -9,6 +9,13 @@ namespace MonitorCowboy.Core;
 /// </summary>
 public sealed class MonitorEntry
 {
+    /// <summary>
+    /// How long a rejected brightness write keeps flagging the monitor as
+    /// likely locked. Bounded so the hint cannot outlive the HDR/picture-mode
+    /// session that caused it by much; a verified write clears it early.
+    /// </summary>
+    private static readonly TimeSpan BrightnessRejectionWindow = TimeSpan.FromMinutes(10);
+
     private readonly object _gate = new();
     private readonly Action<MonitorEntry> _onChanged;
 
@@ -18,12 +25,16 @@ public sealed class MonitorEntry
     private uint? _currentInput;
     private uint? _currentVolume;
     private uint _volumeMax;
+    private uint? _currentBrightness;
+    private uint _brightnessMax;
     private bool _valuesStale;
     private bool _refreshInFlight;
     private DateTime _lastValuesReadUtc = DateTime.MinValue;
     private DateTime _lastCapsAttemptUtc = DateTime.MinValue;
+    private DateTime _brightnessRejectedUtc = DateTime.MinValue;
     private PendingWrite? _pendingInput;
     private PendingWrite? _pendingVolume;
+    private PendingWrite? _pendingBrightness;
 
     public MonitorEntry(int index, MonitorRef monitorRef, string devicePath, string friendlyName, Action<MonitorEntry> onChanged)
     {
@@ -56,6 +67,7 @@ public sealed class MonitorEntry
     }
     public bool SupportsInput { get { lock (_gate) return _caps?.Supports(Vcp.InputSource) ?? false; } }
     public bool SupportsVolume { get { lock (_gate) return _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false; } }
+    public bool SupportsBrightness { get { lock (_gate) return _caps?.Supports(Vcp.Luminance) ?? false; } }
     public DateTime LastValuesReadUtc { get { lock (_gate) return _lastValuesReadUtc; } }
 
     /// <summary>
@@ -80,13 +92,15 @@ public sealed class MonitorEntry
     /// Marks the monitor Ready based on direct VCP probing (capabilities
     /// unreadable). The input list becomes the generic table.
     /// </summary>
-    public void ApplyProbedCapabilities(bool supportsInput, bool supportsVolume)
+    public void ApplyProbedCapabilities(bool supportsInput, bool supportsVolume, bool supportsBrightness)
     {
         var codes = new Dictionary<byte, IReadOnlyList<uint>>();
         if (supportsInput)
             codes[Vcp.InputSource] = InputSourceNames.CommonProbeValues;
         if (supportsVolume)
             codes[Vcp.AudioSpeakerVolume] = [];
+        if (supportsBrightness)
+            codes[Vcp.Luminance] = [];
 
         lock (_gate)
         {
@@ -155,6 +169,14 @@ public sealed class MonitorEntry
                 if (_pendingVolume is { Phase: not OpPhase.Pending })
                     _pendingVolume = null;
             }
+            else if (code == Vcp.Luminance)
+            {
+                _currentBrightness = current;
+                if (max > 0)
+                    _brightnessMax = max;
+                if (_pendingBrightness is { Phase: not OpPhase.Pending })
+                    _pendingBrightness = null;
+            }
 
             _valuesStale = false;
             _lastValuesReadUtc = DateTime.UtcNow;
@@ -190,6 +212,8 @@ public sealed class MonitorEntry
                 _pendingInput = pending;
             else if (code == Vcp.AudioSpeakerVolume)
                 _pendingVolume = pending;
+            else if (code == Vcp.Luminance)
+                _pendingBrightness = pending;
         }
         _onChanged(this);
     }
@@ -221,6 +245,21 @@ public sealed class MonitorEntry
                     changed = true;
                 }
             }
+            else if (code == Vcp.Luminance)
+            {
+                if (_pendingBrightness is { Phase: OpPhase.Pending } p && p.Target == target)
+                {
+                    _pendingBrightness = outcome;
+                    changed = true;
+
+                    // Only a verified write proves brightness is adjustable
+                    // again — reads keep succeeding while it is locked.
+                    if (outcome is { Phase: OpPhase.Rejected })
+                        _brightnessRejectedUtc = DateTime.UtcNow;
+                    else if (outcome is null)
+                        _brightnessRejectedUtc = DateTime.MinValue;
+                }
+            }
         }
         if (changed)
             _onChanged(this);
@@ -245,14 +284,19 @@ public sealed class MonitorEntry
                 CapsProbed = _capsProbed,
                 SupportsInput = _caps?.Supports(Vcp.InputSource) ?? false,
                 SupportsVolume = _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false,
+                SupportsBrightness = _caps?.Supports(Vcp.Luminance) ?? false,
                 InputValues = _caps?.ValuesFor(Vcp.InputSource) ?? [],
                 CurrentInput = _currentInput,
                 CurrentVolume = _currentVolume,
                 VolumeMax = _volumeMax,
+                CurrentBrightness = _currentBrightness,
+                BrightnessMax = _brightnessMax,
+                BrightnessRecentlyRejected = DateTime.UtcNow - _brightnessRejectedUtc < BrightnessRejectionWindow,
                 ValuesStale = _valuesStale,
                 RefreshInFlight = _refreshInFlight,
                 PendingInput = _pendingInput,
                 PendingVolume = _pendingVolume,
+                PendingBrightness = _pendingBrightness,
             };
         }
     }

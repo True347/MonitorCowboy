@@ -28,8 +28,8 @@ public sealed class MonitorService : IDisposable
     /// <summary>Raised (from worker threads) whenever any monitor's state changes. Payload is the device path.</summary>
     public event Action<string>? StateChanged;
 
-    /// <summary>Raised (from worker threads) when a user-initiated write ends as failed.</summary>
-    public event Action<string, byte, uint>? WriteFailed;
+    /// <summary>Raised (from worker threads) when a user-initiated write ends as Failed or Rejected.</summary>
+    public event Action<string, byte, uint, OpPhase>? WriteFailed;
 
     public MonitorService(
         INativeMonitorApi api,
@@ -323,7 +323,7 @@ public sealed class MonitorService : IDisposable
                 _api,
                 entry,
                 OnCapabilitiesRead,
-                (code, target) => WriteFailed?.Invoke(entry.DevicePath, code, target),
+                (code, target, phase) => WriteFailed?.Invoke(entry.DevicePath, code, target, phase),
                 message => _log(message, null),
                 _trace);
             result.Add((entry, worker));

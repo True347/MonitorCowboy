@@ -1,21 +1,24 @@
 # MonitorCowboy 🤠🖥️
 
 A [Flow Launcher](https://www.flowlauncher.com/) plugin to **switch your monitor's input source
-and set its speaker volume over DDC/CI** — a rofi-style multi-layer menu under a single keyword,
-so you never reach for the OSD buttons again.
+and set its brightness and speaker volume over DDC/CI** — a rofi-style multi-layer menu under a
+single keyword, so you never reach for the OSD buttons again.
 
 ```
-mc            →  every external monitor, with its current input and volume
+mc            →  every external monitor, with its current input, brightness and volume
 mc dell       →  filter monitors by name; a unique match drills straight in
-mc 1          →  actions for monitor 1:  Input source / Volume
+mc 1          →  actions for monitor 1:  Input source / Brightness / Volume
 mc 1 in       →  the inputs this monitor reports (✓ marks the active one) — Enter switches
 mc 1 in hdmi  →  same, filtered to inputs whose name contains "hdmi"
+mc 1 bri      →  the current brightness, with two step items: Brightness +5 / Brightness -5
+mc 1 bri 70   →  set the brightness to exactly 70 (0 … the monitor's own maximum)
 mc 1 vol      →  the current volume, with two step items: Volume +5 / Volume -5
 mc 1 vol 30   →  set the volume to exactly 30 (0 … the monitor's own maximum)
 ```
 
 Every write is **verified by reading the value back**, so the list never claims a change the
-monitor did not make. Token synonyms: `in` = `input`, and `vol` = `volume` = `v`.
+monitor did not make. Token synonyms: `in` = `input`, `bri` = `bright` = `brightness` = `b`,
+and `vol` = `volume` = `v`.
 
 ---
 
@@ -29,9 +32,12 @@ a result lands the plugin re-runs the current query so the list updates under th
 
 The success value of `SetVCPFeature` means nothing on its own, so every write is followed by
 reading the value back (up to three attempts). Verified → the cache updates and the entry shows
-`✓`. Read-back failed or mismatched → *"Sent — could not verify"*, which is the normal outcome
-when the write just switched the display away from this PC. The set call itself failing → an
-error toast. Nothing is ever reported as applied on the strength of a return code.
+`✓`. Read-back failed outright → *"Sent — could not verify"*, which is the normal outcome when
+the write just switched the display away from this PC. Read-back **succeeded but the value did
+not move** → the monitor swallowed the write, and the entry says *"Rejected"* — for brightness
+that also raises a toast, because it is how monitors behave when HDR, dynamic contrast, or a
+picture mode is holding brightness locked. The set call itself failing → an error toast. Nothing
+is ever reported as applied on the strength of a return code, and nothing fails silently.
 
 All DDC/CI traffic passes through one process-wide lock. Windows serializes nothing, and
 concurrency is unsafe even across *different* monitors — displays on one adapter, and monitors
@@ -69,12 +75,14 @@ runtime, no helper executable. Restart Flow (or reload plugins) and type `mc`.
 
 | You type | What happens |
 |---|---|
-| `mc` | Every external monitor, numbered. The subtitle carries the cached input and volume — plus `stale` when the last read failed, and `updating…` while a refresh is in flight. Features the monitor lacks are simply omitted, and one that never answered DDC/CI says so instead. |
+| `mc` | Every external monitor, numbered. The subtitle carries the cached input, brightness and volume — plus `stale` when the last read failed, and `updating…` while a refresh is in flight. Features the monitor lacks are simply omitted, and one that never answered DDC/CI says so instead. |
 | `mc dell` | Filters the list by name substring. A unique match drills straight into that monitor; an ambiguous one just narrows the list. |
-| `mc 1` | That monitor's actions: **Input source** and **Volume**, each with its current value. Only features its capabilities actually report are offered. |
+| `mc 1` | That monitor's actions: **Input source**, **Brightness** and **Volume**, each with its current value. Only features its capabilities actually report are offered. |
 | `mc 1 in` | The inputs this monitor accepts, read from its own capabilities string and named from the MCCS table; the subtitle shows the raw VCP value that will be written. `✓` marks the active input. Enter switches and closes the window — the display is probably going away anyway, and failures still surface as a toast. |
 | `mc 1 in hdmi` | Same list, filtered to inputs whose name contains "hdmi". |
-| `mc 1 vol` | The current volume as `Volume: 45 / 100`, plus `Volume +5` and `Volume -5` once the first read has landed. Both keep the window open, so Enter can be pressed repeatedly; steps compound from the newest requested value instead of the last value read back. |
+| `mc 1 bri` | The current brightness as `Brightness: 60 / 100`, plus `Brightness +5` and `Brightness -5` once the first read has landed. Both keep the window open, so Enter can be pressed repeatedly; steps compound from the newest requested value instead of the last value read back. |
+| `mc 1 bri 70` | Adds a `Set brightness to 70` item, with the same range and number validation as volume. |
+| `mc 1 vol` | The current volume as `Volume: 45 / 100`, plus `Volume +5` and `Volume -5`. Same behavior as brightness. |
 | `mc 1 vol 30` | Adds a `Set volume to 30` item. A value above the monitor's own maximum is refused with the range it does accept, and a non-numeric token says so rather than reaching the hardware. |
 
 Navigation is keyboard-first: Enter or Tab drills into the next layer, and every layer carries a
@@ -97,6 +105,10 @@ history never reorders them.
   reported and MonitorCowboy declines to guess a nicer name for them.
 - Docks, KVMs and some hubs strip DDC/CI entirely; monitors that are off or asleep reject it
   until they wake.
+- **HDR, dynamic contrast (DCR), and some picture modes lock brightness** on many monitors while
+  they are active — the monitor still lists brightness as supported and still accepts the
+  command, it just keeps its value. MonitorCowboy detects this by reading the value back and
+  reports it as *Rejected* instead of pretending the change applied.
 - Changes made with the monitor's own buttons produce no notification of any kind, so they show
   up on the next look, once the value cache expires (about 10 seconds).
 
@@ -127,7 +139,7 @@ Three cache layers back the UI, and only the middle one touches disk:
 |---|---|---|
 | Topology | the monitor list, device paths, friendly names | rebuilt on every display topology change (debounced ~1 s) |
 | Capabilities | the parsed `vcp(...)` table: which features exist, which input values are accepted | **persisted**; re-read on demand — or, while a monitor reports DDC/CI as unsupported, retried whenever you query it, at most once a minute, since re-enabling it in the OSD raises no Windows event |
-| Values | current input, current volume, volume maximum | in memory, ~10 s TTL; updated in place by a verified write |
+| Values | current input, brightness and volume, and their maximums | in memory, ~10 s TTL; updated in place by a verified write |
 
 Deleting that file costs nothing but one slow re-read. Flow's **Reload Plugin Data** clears it
 and re-enumerates everything from scratch.
@@ -152,6 +164,11 @@ the keyword, so read one before sending it anywhere.
   unverified.
 - **"Sent — could not verify"** — expected right after switching an input away from this PC: the
   monitor stops answering on that port, so there is nothing to read back. Nothing went wrong.
+- **"Rejected — the monitor kept its previous value"** — the monitor answered the read-back and
+  reported the value unchanged: it swallowed the write. For brightness this almost always means
+  HDR, dynamic contrast, or a picture mode is holding it locked — turn that off (or switch
+  modes) and try again. The brightness menu keeps a note about the rejection for a few minutes
+  so a locked monitor does not look healthy again after the next background read.
 - **A value looks out of date** — front-panel changes are invisible to DDC/CI until the next
   read. Wait out the ~10 s TTL or force it with Shift+Enter → *Refresh values*.
 - **Nothing happens / errors** — check Flow's logs at `%APPDATA%\FlowLauncher\Logs\`; capability

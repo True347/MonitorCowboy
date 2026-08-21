@@ -22,6 +22,13 @@ public sealed record InputMenuIntent(MonitorSnapshot Monitor, string Filter) : Q
 public sealed record VolumeMenuIntent(MonitorSnapshot Monitor, string ValueToken) : QueryIntent;
 
 /// <summary>
+/// L3c: the brightness view of one monitor. <paramref name="ValueToken"/> is the
+/// raw token typed after "bri" ("" when absent); validation against BrightnessMax
+/// happens at render time.
+/// </summary>
+public sealed record BrightnessMenuIntent(MonitorSnapshot Monitor, string ValueToken) : QueryIntent;
+
+/// <summary>
 /// The diagnostics view. Reached only by typing <c>debug</c>; it is deliberately
 /// absent from the monitor list so that the everyday surface stays two items
 /// wide. <paramref name="Argument"/> is the raw token after it ("on"/"off"/"").
