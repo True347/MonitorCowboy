@@ -345,7 +345,10 @@ public sealed class ResultFactory
                 ? $"Brightness: {m.CurrentBrightness} / {m.BrightnessMax}"
                 : "Brightness: reading…",
             BrightnessStatus(m),
-            IconBrightness, 100, view, _ => false));
+            IconBrightness, 100, view, _ => false,
+            // Shift+Enter right where a false rejection shows up is where the
+            // write-only toggle gets found.
+            contextData: devicePath));
 
         if (valueToken.Length > 0)
         {
@@ -599,7 +602,13 @@ public sealed class ResultFactory
 
         return Current();
 
-        string Current() => m.CurrentBrightness?.ToString() ?? "…";
+        string Current() => m.CurrentBrightness switch
+        {
+            null => "…",
+            { } value when m.BrightnessAssumed => $"{value} (last set)",
+            { } value when m.BrightnessWriteOnly => $"{value} (as reported)",
+            { } value => value.ToString(),
+        };
     }
 
     private static string BrightnessStatus(MonitorSnapshot m) => m.PendingBrightness switch
@@ -607,7 +616,9 @@ public sealed class ResultFactory
         { Phase: OpPhase.Pending } p => $"Applying… (target: {p.Target})",
         { Phase: OpPhase.Unverified } => "Sent — could not verify.",
         { Phase: OpPhase.Failed } => "Set failed — the monitor rejected the command.",
-        { Phase: OpPhase.Rejected } => "Rejected — the monitor kept its previous value (possibly locked by HDR / picture mode).",
+        { Phase: OpPhase.Rejected } => "Rejected — the monitor reported its previous value (HDR / picture mode lock?). If it changed anyway: Shift+Enter → write-only.",
+        _ when m.BrightnessAssumed => "Write-only: the last value set. This monitor does not report brightness, so writes are not read back.",
+        _ when m.BrightnessWriteOnly => "Write-only: as reported, which may be off — this monitor does not report the brightness it applies.",
         _ => m.BrightnessRecentlyRejected
             ? "A recent write was rejected — brightness may be locked by HDR or a picture mode."
             : "Type a value to set it, or use the step items below.",

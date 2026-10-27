@@ -63,7 +63,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
             }
 
             var save = () => context.API.SaveSettingJsonStorage<PluginSettings>();
-            var store = new FlowCapsStore(settings, save);
+            var store = new FlowSettingsStore(settings, save);
 
             _diag = new DiagSwitch(
                 Path.Combine(context.CurrentPluginMetadata.PluginSettingsDirectoryPath, "diagnostics"),
@@ -81,10 +81,10 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
 
             if (_diag.Enabled)
             {
-                _diag.Write("--", "INIT.START", $"settings={settingsSource} cachedCaps={settings.CapabilitiesByDevicePath.Count}");
+                _diag.Write("--", "INIT.START", $"settings={settingsSource} cachedCaps={settings.CapabilitiesByDevicePath.Count} brightnessWriteOnly={settings.BrightnessWriteOnlyDevicePaths.Count}");
             }
 
-            _service = new MonitorService(new RealNativeMonitorApi(), store, LogError, trace: _diag);
+            _service = new MonitorService(new RealNativeMonitorApi(), store, LogError, trace: _diag, prefs: store);
             _service.StateChanged += OnServiceStateChanged;
             _service.WriteFailed += OnWriteFailed;
             _service.Initialize();
@@ -196,9 +196,9 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         if (selectedResult.ContextData is not string devicePath || service is null)
             return [];
 
-        return
-        [
-            new Result
+        var results = new List<Result>
+        {
+            new()
             {
                 Title = "Refresh values",
                 SubTitle = "Re-read the current input, brightness, and volume of this monitor.",
@@ -206,7 +206,7 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 AddSelectedCount = false,
                 Action = _ => RunMaintenance(() => service.RequestValueReread(devicePath)),
             },
-            new Result
+            new()
             {
                 Title = "Re-read capabilities",
                 SubTitle = "Slow (can take seconds). Use after enabling DDC/CI in the monitor's OSD.",
@@ -214,7 +214,26 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
                 AddSelectedCount = false,
                 Action = _ => RunMaintenance(() => service.RequestCapsReread(devicePath)),
             },
-        ];
+        };
+
+        // Only where it can mean something: a monitor without brightness
+        // control has no writes to stop verifying.
+        if (service.GetSnapshots().FirstOrDefault(s => s.DevicePath == devicePath) is { CapsState: CapsState.Ready, SupportsBrightness: true } monitor)
+        {
+            var writeOnly = monitor.BrightnessWriteOnly;
+            results.Add(new Result
+            {
+                Title = writeOnly ? "Verify brightness writes again" : "Treat brightness as write-only",
+                SubTitle = writeOnly
+                    ? "Read each brightness write back again, so one the monitor swallows (HDR, picture mode) is reported."
+                    : "For a monitor whose brightness changes but whose reported value never does: skip the read-back and show the last value set.",
+                IcoPath = "Images/brightness.png",
+                AddSelectedCount = false,
+                Action = _ => RunMaintenance(() => service.SetBrightnessWriteOnly(devicePath, !writeOnly)),
+            });
+        }
+
+        return results;
     }
 
     /// <summary>
@@ -567,7 +586,8 @@ public class Main : IAsyncPlugin, IContextMenu, IAsyncReloadable, IDisposable
         var (title, message) = (phase, code) switch
         {
             (OpPhase.Rejected, _) => ("MonitorCowboy: brightness unchanged",
-                $"{name} kept its brightness unchanged — it may be locked by HDR, dynamic contrast, or a picture mode."),
+                $"{name} reported its brightness unchanged — HDR, dynamic contrast, or a picture mode may be locking it. " +
+                "If it changed anyway, mark it write-only: Shift+Enter on the monitor."),
             (_, Vcp.Luminance) => ("MonitorCowboy: set failed",
                 $"{name} rejected the brightness change. If HDR or a special picture mode is active, it may be refusing brightness control."),
             (_, Vcp.InputSource) => ("MonitorCowboy: set failed", $"{name} rejected the input source change."),

@@ -144,4 +144,40 @@ public class MonitorServiceTests
 
         service.Dispose();
     }
+
+    [Fact]
+    public async Task BrightnessWriteOnly_PersistsPerDevicePath_AndSurvivesReload()
+    {
+        var api = new FakeNativeMonitorApi
+        {
+            MonitorsToEnumerate =
+            [
+                new PhysicalMonitorInfo(new MonitorRef(@"\\.\DISPLAY1", 0), @"\\?\DISPLAY#EXT#1", "External Monitor", IsInternal: false),
+                new PhysicalMonitorInfo(new MonitorRef(@"\\.\DISPLAY2", 0), @"\\?\DISPLAY#EXT#2", "Other Monitor", IsInternal: false),
+            ],
+            Capabilities = "(vcp(10 60(0F 11) 62))",
+        };
+        api.SetValue(Vcp.Luminance, 50, 100);
+
+        var settings = new PluginSettings();
+        var store = new FlowSettingsStore(settings, () => { });
+        var service = new MonitorService(api, store, (_, _) => { }, prefs: store);
+        service.Initialize();
+        await WaitUntilAsync(() => service.GetSnapshots() is [{ CapsState: CapsState.Ready }, { CapsState: CapsState.Ready }]);
+
+        Assert.True(service.SetBrightnessWriteOnly(@"\\?\DISPLAY#EXT#1", true));
+        Assert.Equal(@"\\?\DISPLAY#EXT#1", Assert.Single(settings.BrightnessWriteOnlyDevicePaths));
+
+        // Reload Plugin Data: the cache is cleared and every entry is rebuilt
+        // from scratch. The choice has to come back from the store, and only
+        // for the monitor it was made on.
+        await service.RebuildTopologyAsync(clearCapsCache: true);
+        await WaitUntilAsync(() => service.GetSnapshots() is [{ BrightnessWriteOnly: true }, { BrightnessWriteOnly: false }]);
+
+        Assert.True(service.SetBrightnessWriteOnly(@"\\?\DISPLAY#EXT#1", false));
+        Assert.Empty(settings.BrightnessWriteOnlyDevicePaths);
+        Assert.True(service.GetSnapshots() is [{ BrightnessWriteOnly: false }, _]);
+
+        service.Dispose();
+    }
 }

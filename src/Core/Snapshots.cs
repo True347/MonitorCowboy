@@ -86,7 +86,11 @@ public sealed record MonitorSnapshot
     /// <summary>Maximum for 0x62 as reported by the monitor; 0 while unknown.</summary>
     public uint VolumeMax { get; init; }
 
-    /// <summary>Last read 0x10 value; null when unknown/unsupported.</summary>
+    /// <summary>
+    /// Last read 0x10 value — or, on a write-only monitor that has been
+    /// written to, the value last set (<see cref="BrightnessAssumed"/>); null
+    /// when unknown/unsupported.
+    /// </summary>
     public uint? CurrentBrightness { get; init; }
 
     /// <summary>Maximum for 0x10 as reported by the monitor; 0 while unknown.</summary>
@@ -99,6 +103,19 @@ public sealed record MonitorSnapshot
     /// about a monitor that is likely still locked by HDR or a picture mode.
     /// </summary>
     public bool BrightnessRecentlyRejected { get; init; }
+
+    /// <summary>
+    /// True when the user marked this monitor as applying brightness writes
+    /// without reporting them: its writes are not read back, so a value it
+    /// reports is never evidence of anything.
+    /// </summary>
+    public bool BrightnessWriteOnly { get; init; }
+
+    /// <summary>
+    /// True when <see cref="CurrentBrightness"/> is the value last written to
+    /// a write-only monitor rather than one the monitor reported.
+    /// </summary>
+    public bool BrightnessAssumed { get; init; }
 
     /// <summary>True when the last read attempt failed (asleep/off/NAK); values may be outdated.</summary>
     public bool ValuesStale { get; init; }

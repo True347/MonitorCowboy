@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MonitorCowboy;
 using MonitorCowboy.Core;
 using MonitorCowboy.Diagnostics;
@@ -273,7 +274,7 @@ public class PluginSettingsTests
     {
         var settings = new PluginSettings { CapabilitiesByDevicePath = null! };
         var saves = 0;
-        var store = new FlowCapsStore(settings, () => saves++);
+        var store = new FlowSettingsStore(settings, () => saves++);
 
         Assert.Null(store.TryGet(@"\\?\DISPLAY#ABC"));
 
@@ -288,7 +289,7 @@ public class PluginSettingsTests
     [Fact]
     public void CapsStore_SaveFailure_DoesNotPropagate()
     {
-        var store = new FlowCapsStore(new PluginSettings(), () => throw new IOException("locked"));
+        var store = new FlowSettingsStore(new PluginSettings(), () => throw new IOException("locked"));
 
         store.Put("path", "caps");
 
@@ -299,5 +300,47 @@ public class PluginSettingsTests
     public void DiagnosticsEnabled_DefaultsToOff()
     {
         Assert.False(new PluginSettings().DiagnosticsEnabled);
+    }
+
+    [Fact]
+    public void WriteOnlySet_ExplicitNull_CoalescesToEmpty()
+    {
+        var settings = new PluginSettings { BrightnessWriteOnlyDevicePaths = null! };
+
+        Assert.NotNull(settings.BrightnessWriteOnlyDevicePaths);
+        Assert.Empty(settings.BrightnessWriteOnlyDevicePaths);
+    }
+
+    [Fact]
+    public void WriteOnlySet_RoundTripsThroughJson()
+    {
+        // Flow persists this object with System.Text.Json; a set must come back as one.
+        var settings = new PluginSettings();
+        settings.BrightnessWriteOnlyDevicePaths.Add(@"\\?\DISPLAY#ABC");
+
+        var restored = JsonSerializer.Deserialize<PluginSettings>(JsonSerializer.Serialize(settings))!;
+
+        Assert.Equal(@"\\?\DISPLAY#ABC", Assert.Single(restored.BrightnessWriteOnlyDevicePaths));
+    }
+
+    [Fact]
+    public void Prefs_SaveOnlyOnChange_AndSurviveCapsClear()
+    {
+        var settings = new PluginSettings();
+        var saves = 0;
+        var store = new FlowSettingsStore(settings, () => saves++);
+
+        store.SetBrightnessWriteOnly(@"\\?\DISPLAY#ABC", true);
+        store.SetBrightnessWriteOnly(@"\\?\DISPLAY#ABC", true);
+        Assert.True(store.IsBrightnessWriteOnly(@"\\?\DISPLAY#ABC"));
+        Assert.Equal(1, saves);
+
+        // Reload Plugin Data clears the cache, never the user's choice.
+        store.Clear();
+        Assert.True(store.IsBrightnessWriteOnly(@"\\?\DISPLAY#ABC"));
+
+        store.SetBrightnessWriteOnly(@"\\?\DISPLAY#ABC", false);
+        Assert.False(store.IsBrightnessWriteOnly(@"\\?\DISPLAY#ABC"));
+        Assert.Equal(3, saves);
     }
 }

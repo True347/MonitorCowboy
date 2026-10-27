@@ -27,6 +27,8 @@ public sealed class MonitorEntry
     private uint _volumeMax;
     private uint? _currentBrightness;
     private uint _brightnessMax;
+    private bool _brightnessWriteOnly;
+    private bool _brightnessAssumed;
     private bool _valuesStale;
     private bool _refreshInFlight;
     private DateTime _lastValuesReadUtc = DateTime.MinValue;
@@ -68,6 +70,7 @@ public sealed class MonitorEntry
     public bool SupportsInput { get { lock (_gate) return _caps?.Supports(Vcp.InputSource) ?? false; } }
     public bool SupportsVolume { get { lock (_gate) return _caps?.Supports(Vcp.AudioSpeakerVolume) ?? false; } }
     public bool SupportsBrightness { get { lock (_gate) return _caps?.Supports(Vcp.Luminance) ?? false; } }
+    public bool BrightnessWriteOnly { get { lock (_gate) return _brightnessWriteOnly; } }
     public DateTime LastValuesReadUtc { get { lock (_gate) return _lastValuesReadUtc; } }
 
     /// <summary>
@@ -171,7 +174,12 @@ public sealed class MonitorEntry
             }
             else if (code == Vcp.Luminance)
             {
-                _currentBrightness = current;
+                // A write-only monitor keeps answering with a value its writes
+                // never move. Once one has gone out, that answer is known to be
+                // wrong and must not replace the value last set; the maximum
+                // still comes from the read.
+                if (!_brightnessAssumed)
+                    _currentBrightness = current;
                 if (max > 0)
                     _brightnessMax = max;
                 if (_pendingBrightness is { Phase: not OpPhase.Pending })
@@ -182,6 +190,51 @@ public sealed class MonitorEntry
             _lastValuesReadUtc = DateTime.UtcNow;
         }
         _onChanged(this);
+    }
+
+    /// <summary>
+    /// Records a write to a write-only monitor as its current brightness.
+    /// Unlike <see cref="ApplyReadValue"/> it leaves the read bookkeeping
+    /// alone: nothing was read, so the TTL and the stale flag must not
+    /// pretend otherwise.
+    /// </summary>
+    public void ApplyAssumedBrightness(uint target)
+    {
+        lock (_gate)
+        {
+            // Turned off while this write was in flight: the monitor is
+            // believed again, and the re-read queued by turning it off will
+            // say what it holds. An assumed value never outlives the mode.
+            if (!_brightnessWriteOnly)
+                return;
+            _currentBrightness = target;
+            _brightnessAssumed = true;
+        }
+        _onChanged(this);
+    }
+
+    /// <summary>
+    /// The user's call that this monitor applies brightness writes but never
+    /// reports them, so reading one back can only produce a false rejection.
+    /// Either direction starts clean: the rejection hint and a finished badge
+    /// are the other mode's evidence, and an assumed value is worthless once
+    /// the monitor is believed again. <paramref name="notify"/> is false only
+    /// when seeding during a rebuild, as with <see cref="ApplyCapabilities"/>.
+    /// </summary>
+    public void SetBrightnessWriteOnly(bool writeOnly, bool notify = true)
+    {
+        lock (_gate)
+        {
+            if (!writeOnly && _brightnessAssumed)
+                _currentBrightness = null;
+            _brightnessWriteOnly = writeOnly;
+            _brightnessAssumed = false;
+            _brightnessRejectedUtc = DateTime.MinValue;
+            if (_pendingBrightness is { Phase: not OpPhase.Pending })
+                _pendingBrightness = null;
+        }
+        if (notify)
+            _onChanged(this);
     }
 
     public void EndRefresh(bool anyReadFailed)
@@ -292,6 +345,8 @@ public sealed class MonitorEntry
                 CurrentBrightness = _currentBrightness,
                 BrightnessMax = _brightnessMax,
                 BrightnessRecentlyRejected = DateTime.UtcNow - _brightnessRejectedUtc < BrightnessRejectionWindow,
+                BrightnessWriteOnly = _brightnessWriteOnly,
+                BrightnessAssumed = _brightnessAssumed,
                 ValuesStale = _valuesStale,
                 RefreshInFlight = _refreshInFlight,
                 PendingInput = _pendingInput,

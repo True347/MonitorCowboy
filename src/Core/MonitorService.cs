@@ -15,6 +15,7 @@ public sealed class MonitorService : IDisposable
     private readonly TimeSpan _unsupportedRetryTtl;
     private readonly INativeMonitorApi _api;
     private readonly ICapsStore _capsStore;
+    private readonly IMonitorPrefs? _prefs;
     private readonly Action<string, Exception?> _log;
     private readonly IDiag _trace;
     private readonly SemaphoreSlim _rebuildGate = new(1, 1);
@@ -31,16 +32,19 @@ public sealed class MonitorService : IDisposable
     /// <summary>Raised (from worker threads) when a user-initiated write ends as Failed or Rejected.</summary>
     public event Action<string, byte, uint, OpPhase>? WriteFailed;
 
+    /// <param name="prefs">Null means no monitor starts write-only and a toggle is not persisted.</param>
     public MonitorService(
         INativeMonitorApi api,
         ICapsStore capsStore,
         Action<string, Exception?> log,
         TimeSpan? valuesTtl = null,
         TimeSpan? unsupportedRetryTtl = null,
-        IDiag? trace = null)
+        IDiag? trace = null,
+        IMonitorPrefs? prefs = null)
     {
         _api = api;
         _capsStore = capsStore;
+        _prefs = prefs;
         _log = log;
         _trace = trace ?? NullDiag.Instance;
         _valuesTtl = valuesTtl ?? TimeSpan.FromSeconds(10);
@@ -166,6 +170,28 @@ public sealed class MonitorService : IDisposable
 
         entry.MarkCapsReadFailed();
         return false;
+    }
+
+    /// <summary>
+    /// Persists and applies the user's write-only choice for one monitor's
+    /// brightness. Turning it off re-reads at once: the value on screen was
+    /// assumed, and the monitor is about to be believed again.
+    /// </summary>
+    public bool SetBrightnessWriteOnly(string devicePath, bool writeOnly)
+    {
+        var (entry, worker) = TryFind(devicePath);
+        if (entry is null)
+            return false;
+
+        _prefs?.SetBrightnessWriteOnly(devicePath, writeOnly);
+        entry.SetBrightnessWriteOnly(writeOnly);
+
+        if (_trace.Enabled)
+            _trace.Write(entry.Tag, "PREF.SET", $"brightnessWriteOnly={writeOnly}");
+
+        if (!writeOnly && entry.TryBeginRefresh())
+            worker.RequestReadValues();
+        return true;
     }
 
     /// <summary>
@@ -310,13 +336,17 @@ public sealed class MonitorService : IDisposable
                 seeded = true;
             }
 
+            var brightnessWriteOnly = _prefs?.IsBrightnessWriteOnly(monitor.DevicePath) ?? false;
+            if (brightnessWriteOnly)
+                entry.SetBrightnessWriteOnly(true, notify: false);
+
             if (_trace.Enabled)
             {
                 _trace.Write(
                     entry.Tag,
                     "ENUM.MONITOR",
                     $"name=\"{monitor.FriendlyName}\" gdi={monitor.Ref.GdiDeviceName} idx={monitor.Ref.Index} " +
-                    $"cacheSeeded={seeded} cached={cachedRaw is not null} path={monitor.DevicePath}");
+                    $"cacheSeeded={seeded} cached={cachedRaw is not null} brightnessWriteOnly={brightnessWriteOnly} path={monitor.DevicePath}");
             }
 
             var worker = new DdcWorker(

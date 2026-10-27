@@ -351,6 +351,20 @@ public sealed class DdcWorker
         if (_trace.Enabled)
             _trace.Write(_entry.Tag, "VCP.SET", $"code=0x{code:X2} target={Val(code, target)} ok=1 ms={Ms(setStarted)}");
 
+        // A monitor the user marked write-only applies brightness but keeps
+        // reporting a value its writes never move, so a read-back could only
+        // turn every working write into a false rejection. The set call
+        // succeeding is all the evidence there is: it is recorded as an
+        // assumption, and the UI labels it as one.
+        if (code == Vcp.Luminance && _entry.BrightnessWriteOnly)
+        {
+            _entry.ApplyAssumedBrightness(target);
+            _entry.FinishPendingWrite(code, target, null);
+            if (_trace.Enabled)
+                _trace.Write(_entry.Tag, "WRITE.END", $"code=0x{code:X2} target={Val(code, target)} outcome=assumed ms={Ms(opStarted)}");
+            return;
+        }
+
         // The set call returning success means nothing by itself; the only
         // trustworthy signal is reading the value back.
         await Task.Delay(PostSetDelay, ct).ConfigureAwait(false);

@@ -228,6 +228,144 @@ public class DdcWorkerTests
     }
 
     [Fact]
+    public async Task BrightnessWriteOnly_SkipsReadback_RecordsTargetSilently()
+    {
+        // The field-reported shape: the monitor applies the write but keeps
+        // reporting the value it had. With write-only on, no verify read may
+        // run, the target becomes the current value, and nothing is raised.
+        var api = new FakeNativeMonitorApi { ApplyWrites = false };
+        api.SetValue(Vcp.Luminance, 50, 100);
+        var entry = NewReadyEntry();
+        entry.SetBrightnessWriteOnly(true);
+        var callbacks = 0;
+        var worker = new DdcWorker(api, entry, null, (_, _, _) => Interlocked.Increment(ref callbacks));
+
+        var readsAfterSet = 0;
+        api.BeforeSet = () => api.BeforeGet = () => Interlocked.Increment(ref readsAfterSet);
+
+        worker.RequestWrite(Vcp.Luminance, 80);
+
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { CurrentBrightness: 80u, BrightnessAssumed: true, PendingBrightness: null, BrightnessRecentlyRejected: false });
+        Assert.Equal([(Vcp.Luminance, 80u)], api.SetCalls);
+        Assert.Equal(0, Volatile.Read(ref readsAfterSet));
+        Assert.Equal(0, Volatile.Read(ref callbacks));
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task BrightnessWriteOnly_BackgroundRead_KeepsValueLastSet()
+    {
+        // What makes the steps compound on such a monitor: the TTL refresh
+        // keeps reading the stuck value, and it must not replace the one set.
+        var api = new FakeNativeMonitorApi { ApplyWrites = false };
+        api.SetValue(Vcp.Luminance, 50, 100);
+        var entry = NewReadyEntry();
+        entry.SetBrightnessWriteOnly(true);
+        var worker = new DdcWorker(api, entry, null, null);
+
+        // Before any write the reported value is all there is, and it is shown.
+        Assert.True(entry.TryBeginRefresh());
+        worker.RequestReadValues();
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { RefreshInFlight: false, CurrentBrightness: 50u, BrightnessAssumed: false });
+
+        worker.RequestWrite(Vcp.Luminance, 80);
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { CurrentBrightness: 80u, BrightnessAssumed: true });
+
+        Assert.True(entry.TryBeginRefresh());
+        worker.RequestReadValues();
+        await WaitUntilAsync(() => !entry.BuildSnapshot().RefreshInFlight);
+        Assert.True(entry.BuildSnapshot() is { CurrentBrightness: 80u, BrightnessMax: 100u, BrightnessAssumed: true });
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task BrightnessWriteOnly_SetFails_StillReportsFailed()
+    {
+        // Write-only gives up the read-back, not the return code: a set the
+        // driver refuses is still a failure, badge and callback both.
+        var api = new FakeNativeMonitorApi { FailSet = true };
+        api.SetValue(Vcp.Luminance, 50, 100);
+        var entry = NewReadyEntry();
+        entry.SetBrightnessWriteOnly(true);
+        var failures = new List<(byte Code, uint Target, OpPhase Phase)>();
+        var worker = new DdcWorker(api, entry, null, (code, target, phase) => { lock (failures) failures.Add((code, target, phase)); });
+
+        worker.RequestWrite(Vcp.Luminance, 80);
+
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { PendingBrightness: { Phase: OpPhase.Failed, Target: 80u }, BrightnessAssumed: false });
+        await WaitUntilAsync(() => { lock (failures) return failures.Contains((Vcp.Luminance, 80u, OpPhase.Failed)); });
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task BrightnessWriteOnly_DoesNotLeakIntoVolume()
+    {
+        var api = new FakeNativeMonitorApi { ApplyWrites = false };
+        api.SetValue(Vcp.AudioSpeakerVolume, 50, 100);
+        var entry = NewReadyEntry();
+        entry.SetBrightnessWriteOnly(true);
+        var worker = new DdcWorker(api, entry, null, null);
+
+        worker.RequestWrite(Vcp.AudioSpeakerVolume, 30);
+
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { PendingVolume: { Phase: OpPhase.Rejected, Target: 30u }, CurrentVolume: 50u });
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public async Task BrightnessWriteOnly_Toggle_StartsEachModeClean()
+    {
+        var api = new FakeNativeMonitorApi { ApplyWrites = false };
+        api.SetValue(Vcp.Luminance, 50, 100);
+        var entry = NewReadyEntry();
+        var worker = new DdcWorker(api, entry, null, null);
+
+        // Verified mode first: the stuck read-back is a rejection, as shipped.
+        worker.RequestWrite(Vcp.Luminance, 80);
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { PendingBrightness.Phase: OpPhase.Rejected, BrightnessRecentlyRejected: true });
+
+        // Turning it on retires that evidence: it is exactly the false alarm
+        // the mode exists for.
+        entry.SetBrightnessWriteOnly(true);
+        Assert.True(entry.BuildSnapshot() is { BrightnessWriteOnly: true, PendingBrightness: null, BrightnessRecentlyRejected: false });
+
+        worker.RequestWrite(Vcp.Luminance, 70);
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { CurrentBrightness: 70u, BrightnessAssumed: true });
+
+        // Turning it off drops the assumed value rather than passing it off
+        // as read, and the next write is verified again.
+        entry.SetBrightnessWriteOnly(false);
+        Assert.True(entry.BuildSnapshot() is { BrightnessWriteOnly: false, BrightnessAssumed: false, CurrentBrightness: null });
+
+        worker.RequestWrite(Vcp.Luminance, 60);
+        await WaitUntilAsync(() => entry.BuildSnapshot() is { PendingBrightness: { Phase: OpPhase.Rejected, Target: 60u }, CurrentBrightness: 50u });
+
+        worker.Complete();
+        await worker.Completion;
+    }
+
+    [Fact]
+    public void AssumedBrightness_NeverOutlivesWriteOnlyMode()
+    {
+        // A write that skipped verification but lands after the mode was
+        // turned off must not be recorded: the monitor is believed again.
+        var entry = NewReadyEntry();
+        entry.ApplyReadValue(Vcp.Luminance, 50, 100);
+
+        entry.ApplyAssumedBrightness(80);
+
+        Assert.True(entry.BuildSnapshot() is { CurrentBrightness: 50u, BrightnessAssumed: false });
+    }
+
+    [Fact]
     public async Task Writes_SameCode_CoalesceLatestWins()
     {
         var api = new FakeNativeMonitorApi();
